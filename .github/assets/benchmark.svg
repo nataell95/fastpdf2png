@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 680 340" font-family="'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bbg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#fafafa"/>
+      <stop offset="100%" style="stop-color:#f4f4f5"/>
+    </linearGradient>
+    <linearGradient id="fp" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#a78bfa"/>
+      <stop offset="100%" style="stop-color:#7b68ee"/>
+    </linearGradient>
+    <linearGradient id="mu" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#fbbf24"/>
+      <stop offset="100%" style="stop-color:#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="py" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#f87171"/>
+      <stop offset="100%" style="stop-color:#ef4444"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="680" height="340" rx="12" fill="url(#bbg)" stroke="#e4e4e7" stroke-width="1"/>
+
+  <!-- Title -->
+  <text x="340" y="30" text-anchor="middle" fill="#18181b" font-size="14" font-weight="700">Single-process throughput (pages/sec)</text>
+  <text x="340" y="46" text-anchor="middle" fill="#a1a1aa" font-size="10">71-page mixed PDF, Apple M3 Max, compression level 2</text>
+
+  <!-- Chart area: y=60..255 (195px), scale max=550 -->
+  <!-- y = 255 - (val/550)*195 -->
+
+  <!-- Y grid -->
+  <line x1="55" y1="255" x2="640" y2="255" stroke="#e4e4e7" stroke-width="1"/>
+  <text x="48" y="259" text-anchor="end" fill="#a1a1aa" font-size="9">0</text>
+  <line x1="55" y1="219" x2="640" y2="219" stroke="#f4f4f5" stroke-width="1"/>
+  <text x="48" y="223" text-anchor="end" fill="#a1a1aa" font-size="9">100</text>
+  <line x1="55" y1="184" x2="640" y2="184" stroke="#f4f4f5" stroke-width="1"/>
+  <text x="48" y="188" text-anchor="end" fill="#a1a1aa" font-size="9">200</text>
+  <line x1="55" y1="148" x2="640" y2="148" stroke="#f4f4f5" stroke-width="1"/>
+  <text x="48" y="152" text-anchor="end" fill="#a1a1aa" font-size="9">300</text>
+  <line x1="55" y1="113" x2="640" y2="113" stroke="#f4f4f5" stroke-width="1"/>
+  <text x="48" y="117" text-anchor="end" fill="#a1a1aa" font-size="9">400</text>
+  <line x1="55" y1="77" x2="640" y2="77" stroke="#f4f4f5" stroke-width="1"/>
+  <text x="48" y="81" text-anchor="end" fill="#a1a1aa" font-size="9">500</text>
+
+  <!-- Group 1: 72 DPI — center=170 -->
+  <!-- fp: 531 → 255-(531/550)*195 = 255-188.3=66.7, h=188 -->
+  <rect x="108" y="67" width="40" height="188" rx="4" fill="url(#fp)"/>
+  <text x="128" y="60" text-anchor="middle" fill="#7b68ee" font-size="10" font-weight="700">531</text>
+  <!-- mu: 119 → 255-(119/550)*195=255-42.2=212.8, h=42 -->
+  <rect x="152" y="213" width="40" height="42" rx="4" fill="url(#mu)"/>
+  <text x="172" y="208" text-anchor="middle" fill="#f59e0b" font-size="9" font-weight="600">119</text>
+  <!-- py: 101 → 255-(101/550)*195=255-35.8=219.2, h=36 -->
+  <rect x="196" y="219" width="40" height="36" rx="4" fill="url(#py)"/>
+  <text x="216" y="214" text-anchor="middle" fill="#ef4444" font-size="9" font-weight="600">101</text>
+  <text x="170" y="275" text-anchor="middle" fill="#71717a" font-size="11" font-weight="600">72 DPI</text>
+
+  <!-- Group 2: 150 DPI — center=370 -->
+  <!-- fp: 323 → 255-(323/550)*195=255-114.5=140.5, h=115 -->
+  <rect x="308" y="140" width="40" height="115" rx="4" fill="url(#fp)"/>
+  <text x="328" y="134" text-anchor="middle" fill="#7b68ee" font-size="10" font-weight="700">323</text>
+  <!-- mu: 37 → 255-(37/550)*195=255-13.1=241.9, h=13 -->
+  <rect x="352" y="242" width="40" height="13" rx="4" fill="url(#mu)"/>
+  <text x="372" y="237" text-anchor="middle" fill="#f59e0b" font-size="9" font-weight="600">37</text>
+  <!-- py: 30 → 255-(30/550)*195=255-10.6=244.4, h=11 -->
+  <rect x="396" y="244" width="40" height="11" rx="4" fill="url(#py)"/>
+  <text x="416" y="239" text-anchor="middle" fill="#ef4444" font-size="9" font-weight="600">30</text>
+  <text x="370" y="275" text-anchor="middle" fill="#71717a" font-size="11" font-weight="600">150 DPI</text>
+
+  <!-- Group 3: 300 DPI — center=570 -->
+  <!-- fp: 145 → 255-(145/550)*195=255-51.4=203.6, h=51 -->
+  <rect x="508" y="204" width="40" height="51" rx="4" fill="url(#fp)"/>
+  <text x="528" y="198" text-anchor="middle" fill="#7b68ee" font-size="10" font-weight="700">145</text>
+  <!-- mu: 12 → 255-(12/550)*195=255-4.3=250.7, h=4 -->
+  <rect x="552" y="251" width="40" height="4" rx="2" fill="url(#mu)"/>
+  <text x="572" y="246" text-anchor="middle" fill="#f59e0b" font-size="9" font-weight="600">12</text>
+  <!-- py: 9 → 255-(9/550)*195=255-3.2=251.8, h=3 -->
+  <rect x="596" y="252" width="40" height="3" rx="2" fill="url(#py)"/>
+  <text x="616" y="247" text-anchor="middle" fill="#ef4444" font-size="9" font-weight="600">9</text>
+  <text x="570" y="275" text-anchor="middle" fill="#71717a" font-size="11" font-weight="600">300 DPI</text>
+
+  <!-- Legend -->
+  <rect x="140" y="296" width="12" height="12" rx="3" fill="url(#fp)"/>
+  <text x="158" y="307" fill="#18181b" font-size="10" font-weight="600">fastpdf2png</text>
+  <rect x="270" y="296" width="12" height="12" rx="3" fill="url(#mu)"/>
+  <text x="288" y="307" fill="#71717a" font-size="10">MuPDF</text>
+  <rect x="370" y="296" width="12" height="12" rx="3" fill="url(#py)"/>
+  <text x="388" y="307" fill="#71717a" font-size="10">PyMuPDF</text>
+
+  <!-- Badge -->
+  <rect x="470" y="293" width="160" height="22" rx="11" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="550" y="308" text-anchor="middle" fill="#16a34a" font-size="9" font-weight="600">38% smaller output files</text>
+</svg>

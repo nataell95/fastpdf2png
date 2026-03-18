@@ -1,3 +1,11 @@
+<p align="center">
+  <sub>Built for <a href="https://miruiq.com"><strong>Miruiq</strong></a> — AI-powered data extraction from PDFs and documents.</sub>
+</p>
+
+<p align="center">
+  <a href="https://miruiq.com"><img src=".github/assets/miruiq_screenshot.png" alt="Miruiq" width="500"></a>
+</p>
+
 # fastpdf2png
 
 Fast PDF to PNG converter. SIMD-optimized PNG encoding, automatic grayscale detection, multi-process scaling. MIT licensed.
@@ -58,22 +66,13 @@ engine.close();
 
 ## Performance
 
-71-page PDF (mixed: text, charts, tables, images) on Apple M3 Max. All tools single-process, compression level 2.
+<p align="center">
+  <img src=".github/assets/scaling.svg" alt="Worker scaling" width="680">
+</p>
 
-| Engine | 72 DPI | 150 DPI | 300 DPI | File size |
-|--------|-------:|--------:|--------:|----------:|
-| **fastpdf2png** | **531 pg/s** | **323 pg/s** | **145 pg/s** | **-38%** |
-| MuPDF | 119 | 37 | 12 | baseline |
-| PyMuPDF | 101 | 30 | 9 | baseline |
-
-With multiple workers (150 DPI):
-
-| Workers | Pages/sec |
-|:-------:|----------:|
-| 1 | 323 |
-| 2 | 582 |
-| 4 | 985 |
-| 8 | 1536 |
+<p align="center">
+  <img src=".github/assets/benchmark.svg" alt="Benchmark" width="680">
+</p>
 
 ## How it works
 
@@ -112,12 +111,3 @@ fastpdf2png --daemon
 
 MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
----
-
-<p align="center">
-  <sub>Built for <a href="https://miruiq.com"><strong>Miruiq</strong></a> — AI-powered data extraction from PDFs and documents.</sub>
-</p>
-
-<p align="center">
-  <a href="https://miruiq.com"><img src=".github/assets/miruiq_screenshot.png" alt="Miruiq" width="500"></a>
-</p>
