@@ -103,7 +103,7 @@ jobs:
           cat > "$PKG_DIR/package.json" << PKGJSON
           {
             "name": "${PKG_NAME}",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "description": "fastpdf2png binary for ${NPM_PLATFORM}-${NPM_ARCH}",
             "os": ["${NPM_PLATFORM}"],
             "cpu": ["${NPM_ARCH}"],
