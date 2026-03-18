@@ -22,8 +22,8 @@ if not exist "%PDFIUM%\include" (
 
 if not exist "%BUILD%" mkdir "%BUILD%"
 
-set CXXFLAGS=/O2 /DNDEBUG /EHsc /std:c++17 /MD /GL
-set CFLAGS=/O2 /DNDEBUG /DSUPPORT_NEAR_OPTIMAL_PARSING=0 /GL
+set CXXFLAGS=/O2 /DNDEBUG /EHsc /std:c++17 /MD /GL /W4 /wd4100
+set CFLAGS=/O2 /DNDEBUG /DSUPPORT_NEAR_OPTIMAL_PARSING=0 /GL /W4 /wd4100
 
 :: Detect AVX2 support at build time
 set SIMD_FLAGS=
@@ -51,7 +51,7 @@ cl /c %CXXFLAGS% "%SRC%\fpng\fpng.cpp" /Fo"%BUILD%\fpng.obj" >nul 2>&1
 
 :: Compile source
 cl /c %CXXFLAGS% /I"%PDFIUM%\include" /I"%SRC%" /I"%DEFLATE%" "%SRC%\png_writer.cpp" /Fo"%BUILD%\png_writer.obj"
-cl /c %CXXFLAGS% /I"%PDFIUM%\include" /I"%SRC%" "%SRC%\main.cc" /Fo"%BUILD%\main.obj"
+cl /c %CXXFLAGS% /I"%PDFIUM%\include" /I"%SRC%" "%SRC%\main.cpp" /Fo"%BUILD%\main.obj"
 
 :: Link
 set OBJS=%BUILD%\main.obj %BUILD%\png_writer.obj %BUILD%\fpng.obj

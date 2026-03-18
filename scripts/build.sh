@@ -31,8 +31,8 @@ fi
 OS=$(uname -s)
 ARCH=$(uname -m)
 
-CXXFLAGS="-std=c++17 -O3 -DNDEBUG -flto"
-CFLAGS="-O3 -DNDEBUG -flto -DSUPPORT_NEAR_OPTIMAL_PARSING=0"
+CXXFLAGS="-std=c++17 -O3 -DNDEBUG -flto -Wall -Wextra -Wpedantic -Wno-unused-parameter"
+CFLAGS="-O3 -DNDEBUG -flto -Wall -Wextra -Wpedantic -Wno-unused-parameter -DSUPPORT_NEAR_OPTIMAL_PARSING=0"
 
 if [ "$ARCH" = "x86_64" ]; then
     SIMD_FLAGS="-mavx2 -msse4.1 -mssse3 -mpclmul"
@@ -78,7 +78,7 @@ $CXX -c $CXXFLAGS -I"$PDFIUM/include" -I"$SRC" -I"$DEFLATE" \
     "$SRC/png_writer.cpp" -o "$BUILD/png_writer.o"
 
 $CXX -c $CXXFLAGS -I"$PDFIUM/include" -I"$SRC" \
-    "$SRC/main.cc" -o "$BUILD/main.o"
+    "$SRC/main.cpp" -o "$BUILD/main.o"
 
 # Link
 OBJS="$BUILD/main.o $BUILD/png_writer.o $BUILD/fpng.o"

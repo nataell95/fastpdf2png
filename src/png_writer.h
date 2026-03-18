@@ -4,34 +4,34 @@
 #ifndef FASTPDF2PNG_FAST_PNG_WRITER_H_
 #define FASTPDF2PNG_FAST_PNG_WRITER_H_
 
-#include <stdint.h>
-#include <stddef.h>
+#include <cstdint>
+#include <cstddef>
 
-// Error codes
-#define FAST_PNG_SUCCESS 0
-#define FAST_PNG_ERROR_INVALID_PARAMS 1
-#define FAST_PNG_ERROR_ALLOC_FAILED 2
-#define FAST_PNG_ERROR_COMPRESS_FAILED 3
-#define FAST_PNG_ERROR_FILE_OPEN_FAILED 4
-#define FAST_PNG_ERROR_FILE_WRITE_FAILED 5
+namespace fast_png {
 
-// Compression levels
-#define FAST_PNG_COMPRESS_FAST   0  // fpng (largest files, fastest)
-#define FAST_PNG_COMPRESS_MEDIUM 1  // fpng slower (~6% smaller)
-#define FAST_PNG_COMPRESS_BEST   2  // libdeflate (smallest files)
+constexpr int kSuccess = 0;
+constexpr int kErrorInvalidParams = 1;
+constexpr int kErrorAllocFailed = 2;
+constexpr int kErrorCompressFailed = 3;
+constexpr int kErrorFileOpenFailed = 4;
+constexpr int kErrorFileWriteFailed = 5;
+
+constexpr int kCompressFast = 0;
+constexpr int kCompressMedium = 1;
+constexpr int kCompressBest = 2;
 
 // Write BGRA pixel buffer to PNG file.
-// Auto-detects grayscale pages and outputs 8-bit grayscale (1/3 data).
-// Uses thread-local buffers — zero allocation after warmup.
-int FastPngWriteBgra(const char* filename,
-                     const uint8_t* pixels,
-                     int width, int height, int stride,
-                     int compression_level = FAST_PNG_COMPRESS_FAST);
+int WriteBgra(const char* filename,
+              const uint8_t* pixels,
+              int width, int height, int stride,
+              int compression_level = kCompressFast);
 
 // Write BGRA pixel buffer to PNG in memory.
-int FastPngWriteBgraToMemory(const uint8_t* pixels,
-                             int width, int height, int stride,
-                             uint8_t** out_data, size_t* out_size,
-                             int compression_level = FAST_PNG_COMPRESS_FAST);
+int WriteBgraToMemory(const uint8_t* pixels,
+                      int width, int height, int stride,
+                      uint8_t** out_data, size_t* out_size,
+                      int compression_level = kCompressFast);
+
+}  // namespace fast_png
 
 #endif  // FASTPDF2PNG_FAST_PNG_WRITER_H_

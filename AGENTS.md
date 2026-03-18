@@ -8,7 +8,7 @@ Ultra-fast PDF to PNG converter. 49x faster than MuPDF. MIT licensed.
 fastpdf2png/
 ├── fastpdf2png/         Python package (pip install -e .)
 ├── src/                 All C/C++ source code
-│   ├── main.cc          CLI + daemon entry point
+│   ├── main.cpp          CLI + daemon entry point
 │   ├── png_writer.cpp   PNG encoder (SIMD, libdeflate, grayscale)
 │   ├── png_writer.h
 │   ├── memory_pool.h    Thread-local allocator

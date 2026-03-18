@@ -4,25 +4,23 @@
 #ifndef FASTPDF2PNG_MEMORY_POOL_H_
 #define FASTPDF2PNG_MEMORY_POOL_H_
 
-#include <stdint.h>
-#include <stddef.h>
-#include <stdlib.h>
+#include <cstdint>
+#include <cstddef>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <malloc.h>
-#define ALIGNED_ALLOC(align, size) _aligned_malloc(size, align)
-#define ALIGNED_FREE(ptr) _aligned_free(ptr)
-#else
-#include <sys/mman.h>
-#define ALIGNED_ALLOC(align, size) aligned_alloc_wrapper(align, size)
-#define ALIGNED_FREE(ptr) free(ptr)
-
-inline void* aligned_alloc_wrapper(size_t alignment, size_t size) {
-  void* ptr = nullptr;
-  if (posix_memalign(&ptr, alignment, size) != 0)
-    return nullptr;
-  return ptr;
+inline void* aligned_alloc_portable(size_t align, size_t size) {
+  return _aligned_malloc(size, align);
 }
+inline void aligned_free_portable(void* ptr) { _aligned_free(ptr); }
+#else
+inline void* aligned_alloc_portable(size_t align, size_t size) {
+  // C11/C++17 std::aligned_alloc requires size to be a multiple of align
+  size = (size + align - 1) & ~(align - 1);
+  return std::aligned_alloc(align, size);
+}
+inline void aligned_free_portable(void* ptr) { std::free(ptr); }
 #endif
 
 #if defined(__linux__)
@@ -61,7 +59,8 @@ class PageMemoryPool {
         buffer_ = nullptr;
       }
 #endif
-      buffer_ = static_cast<uint8_t*>(ALIGNED_ALLOC(kCacheLineSize, new_capacity));
+      buffer_ = static_cast<uint8_t*>(
+          aligned_alloc_portable(kCacheLineSize, new_capacity));
       if (buffer_) {
         capacity_ = new_capacity;
         use_mmap_ = false;
@@ -75,9 +74,9 @@ class PageMemoryPool {
     if (!buffer_) return;
 #if USE_HUGE_PAGES
     if (use_mmap_) munmap(buffer_, capacity_);
-    else ALIGNED_FREE(buffer_);
+    else aligned_free_portable(buffer_);
 #else
-    ALIGNED_FREE(buffer_);
+    aligned_free_portable(buffer_);
 #endif
     buffer_ = nullptr;
     capacity_ = 0;
@@ -88,7 +87,8 @@ class PageMemoryPool {
   bool use_mmap_ = false;
 };
 
-inline PageMemoryPool& GetThreadLocalPool() {
+// thread_local ensures each fork'd child gets its own pool instance
+inline PageMemoryPool& GetProcessLocalPool() {
   static thread_local PageMemoryPool pool;
   return pool;
 }
