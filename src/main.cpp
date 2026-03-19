@@ -291,10 +291,9 @@ int RenderMulti(const char* pdf_path, float dpi, const char* pattern,
 #endif
 
 // ---------------------------------------------------------------------------
-// Daemon mode (Unix only)
+// Daemon mode
 // ---------------------------------------------------------------------------
 
-#ifndef _WIN32
 int SplitTabs(char* line, char** tokens, int max_tokens) {
   int count = 0;
   auto* p = line;
@@ -360,7 +359,6 @@ int RunDaemon() {
   FPDF_DestroyLibrary();
   return 0;
 }
-#endif
 
 }  // namespace
 
@@ -379,14 +377,10 @@ int main(int argc, char* argv[]) {
     return 0;
   }
 
-#ifndef _WIN32
   if (argc == 2 && std::string_view{argv[1]} == "--daemon")
     return RunDaemon();
-#else
-  if (argc == 2 && std::string_view{argv[1]} == "--daemon") {
-    std::fprintf(stderr, "Daemon mode is not supported on Windows\n");
-    return 1;
-  }
+
+#ifdef _WIN32
   if (argc == 7 && std::string_view{argv[1]} == "--worker") {
     const auto dpi = std::atoi(argv[4]) / 10.0f;
     return RunWindowsWorker(argv[2], dpi, argv[3], std::atoi(argv[5]), argv[6]);
