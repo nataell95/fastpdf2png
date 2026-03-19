@@ -56,6 +56,9 @@ def test_page_count():
 
 def test_engine():
     if not TEST_PDF: return print("SKIP: no test PDF")
+    import sys
+    if sys.platform == "win32":
+        return print("SKIP: daemon mode not supported on Windows")
     import fastpdf2png
     with fastpdf2png.Engine() as pdf:
         n = pdf.page_count(TEST_PDF)
