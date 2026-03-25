@@ -109,6 +109,52 @@ def to_bytes(pdf: Union[str, Path], dpi: int = 150, workers: int = None) -> List
         return [f.read_bytes() for f in files]
 
 
+def to_raw(
+    pdf: Union[str, Path], dpi: int = 150, workers: int = 1,
+) -> list:
+    """
+    Convert a PDF to raw BGR pixel buffers (no PNG encoding).
+
+    Args:
+        pdf: Path to the PDF file.
+        dpi: Resolution (default 150).
+        workers: Unused (kept for API symmetry). Raw mode is single-process.
+
+    Returns:
+        List of (bgr_bytes, width, height) tuples — one per page.
+        bgr_bytes is width*height*3 bytes in BGR order, row-major.
+
+    Example:
+        pages = fastpdf2png.to_raw("report.pdf", dpi=100)
+        bgr, w, h = pages[0]
+    """
+    binary = _find_binary()
+    result = subprocess.run(
+        [str(binary), "--raw-stdout", str(Path(pdf).resolve()), str(dpi)],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Raw conversion failed: {result.stderr.decode()}")
+
+    pages = []
+    buf = result.stdout
+    pos = 0
+    while pos < len(buf):
+        if pos + 8 > len(buf):
+            break
+        w = int.from_bytes(buf[pos:pos + 4], "little"); pos += 4
+        h = int.from_bytes(buf[pos:pos + 4], "little"); pos += 4
+        size = w * h * 3
+        if pos + size > len(buf):
+            raise RuntimeError(
+                f"Truncated raw output: expected {size} bytes for {w}x{h} page, "
+                f"got {len(buf) - pos}"
+            )
+        pixels = buf[pos:pos + size]; pos += size
+        pages.append((pixels, w, h))
+    return pages
+
+
 def page_count(pdf: Union[str, Path]) -> int:
     """
     Get the number of pages in a PDF (instant, no rendering).
@@ -227,6 +273,15 @@ class Engine:
         with tempfile.TemporaryDirectory() as tmpdir:
             files = self.to_files(pdf, tmpdir, dpi=dpi, workers=workers)
             return [f.read_bytes() for f in files]
+
+    def to_raw(self, pdf: Union[str, Path], dpi: int = 150, workers: int = 1) -> list:
+        """Convert a PDF to raw BGR pixel buffers (no PNG encoding).
+
+        Returns list of (bgr_bytes, width, height) tuples.
+        Note: Uses a separate subprocess (not the daemon pipe) because
+        raw binary output on stdout conflicts with the daemon text protocol.
+        """
+        return to_raw(pdf, dpi=dpi, workers=workers)
 
     def page_count(self, pdf: Union[str, Path]) -> int:
         """Get page count (instant)."""

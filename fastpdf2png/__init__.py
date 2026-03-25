@@ -6,6 +6,7 @@ fastpdf2png — Ultra-fast PDF to PNG converter.
     images = fastpdf2png.to_images("doc.pdf")           # PIL images
     files  = fastpdf2png.to_files("doc.pdf", "output/")  # save to folder
     data   = fastpdf2png.to_bytes("doc.pdf")             # raw PNG bytes
+    raw    = fastpdf2png.to_raw("doc.pdf")               # raw BGR pixels
     n      = fastpdf2png.page_count("doc.pdf")           # number of pages
 
     # Batch processing (keeps engine warm):
@@ -14,7 +15,7 @@ fastpdf2png — Ultra-fast PDF to PNG converter.
             images = pdf.to_images(path)
 """
 
-from .converter import to_images, to_files, to_bytes, page_count, Engine
+from .converter import to_images, to_files, to_bytes, to_raw, page_count, Engine
 
 __version__ = "1.3.1"
-__all__ = ["to_images", "to_files", "to_bytes", "page_count", "Engine"]
+__all__ = ["to_images", "to_files", "to_bytes", "to_raw", "page_count", "Engine"]

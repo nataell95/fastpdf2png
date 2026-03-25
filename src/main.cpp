@@ -291,6 +291,167 @@ int RenderMulti(const char* pdf_path, float dpi, const char* pattern,
 #endif
 
 // ---------------------------------------------------------------------------
+// Raw stdout mode — streams BGR pixels (no PNG encoding)
+// ---------------------------------------------------------------------------
+
+// Per-page slot in shared memory for multi-worker raw rendering
+struct alignas(64) PageSlot {
+  std::atomic<int> ready{0};  // 0=pending, 1=done
+  char pad[60];
+  int32_t width;
+  int32_t height;
+  size_t bgr_offset;  // offset into shared BGR buffer
+};
+
+int RenderRawStdout(const char* pdf_path, float dpi, int workers = 1) {
+  auto* doc = FPDF_LoadDocument(pdf_path, nullptr);
+  if (!doc) { std::fprintf(stderr, "Failed to open: %s\n", pdf_path); return 1; }
+
+  const auto num_pages = FPDF_GetPageCount(doc);
+  const auto scale = dpi / kPointsPerInch;
+
+#ifdef _WIN32
+  _setmode(_fileno(stdout), _O_BINARY);
+#endif
+
+  // Pre-compute page dimensions and total BGR buffer size
+  struct PageInfo { int w, h; size_t bgr_size, bgr_offset; };
+  std::vector<PageInfo> infos(num_pages);
+  size_t total_bgr = 0;
+  for (int i = 0; i < num_pages; ++i) {
+    auto* page = FPDF_LoadPage(doc, i);
+    if (!page) { FPDF_CloseDocument(doc); return 1; }
+    infos[i].w = static_cast<int>(FPDF_GetPageWidth(page) * scale + 0.5f);
+    infos[i].h = static_cast<int>(FPDF_GetPageHeight(page) * scale + 0.5f);
+    infos[i].bgr_size = static_cast<size_t>(infos[i].w) * infos[i].h * 3;
+    infos[i].bgr_offset = total_bgr;
+    total_bgr += infos[i].bgr_size;
+    FPDF_ClosePage(page);
+  }
+  FPDF_CloseDocument(doc);
+
+  if (workers <= 1 || num_pages <= 1) {
+    // Single-process: render + write sequentially (original path)
+    auto* doc2 = FPDF_LoadDocument(pdf_path, nullptr);
+    if (!doc2) return 1;
+    for (int i = 0; i < num_pages; ++i) {
+      auto* page = FPDF_LoadPage(doc2, i);
+      if (!page) { FPDF_CloseDocument(doc2); return 1; }
+      int w = infos[i].w, h = infos[i].h;
+      const auto stride = (w * 4 + 63) & ~63;
+      auto& pool = fast_png::GetProcessLocalPool();
+      auto* buffer = pool.Acquire(static_cast<size_t>(stride) * h);
+      if (!buffer) { FPDF_ClosePage(page); FPDF_CloseDocument(doc2); return 1; }
+      auto* bitmap = FPDFBitmap_CreateEx(w, h, FPDFBitmap_BGRx, buffer, stride);
+      FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0xFFFFFFFF);
+      FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, 0, FPDF_ANNOT | FPDF_PRINTING | FPDF_NO_CATCH);
+      auto w32 = static_cast<uint32_t>(w), h32 = static_cast<uint32_t>(h);
+      std::fwrite(&w32, 4, 1, stdout);
+      std::fwrite(&h32, 4, 1, stdout);
+      auto bgr_size = infos[i].bgr_size;
+      auto* bgr = pool.Acquire(bgr_size);
+      auto* dst = bgr;
+      for (int y = 0; y < h; ++y) {
+        const auto* row = buffer + y * stride;
+        for (int x = 0; x < w; ++x) { dst[0]=row[x*4]; dst[1]=row[x*4+1]; dst[2]=row[x*4+2]; dst+=3; }
+      }
+      std::fwrite(bgr, 1, bgr_size, stdout);
+      FPDFBitmap_Destroy(bitmap);
+      FPDF_ClosePage(page);
+    }
+    FPDF_CloseDocument(doc2);
+    return 0;
+  }
+
+  // Multi-process: shared memory for BGR pixels + slots
+  size_t slots_size = sizeof(PageSlot) * num_pages;
+  size_t shm_size = slots_size + total_bgr;
+
+  auto* shm = static_cast<uint8_t*>(mmap(nullptr, shm_size, PROT_READ | PROT_WRITE,
+                                          MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+  if (shm == MAP_FAILED) { perror("mmap"); return 1; }
+
+  auto* slots = reinterpret_cast<PageSlot*>(shm);
+  auto* bgr_buf = shm + slots_size;
+
+  // Init slots
+  for (int i = 0; i < num_pages; ++i) {
+    new (&slots[i]) PageSlot{};
+    slots[i].width = infos[i].w;
+    slots[i].height = infos[i].h;
+    slots[i].bgr_offset = infos[i].bgr_offset;
+  }
+
+  // Shared work counter
+  auto* shared = static_cast<SharedState*>(mmap(nullptr, sizeof(SharedState),
+      PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+  shared->next_page.store(0);
+  shared->completed_pages.store(0);
+  shared->total_pages = num_pages;
+
+  // Fork workers
+  std::vector<pid_t> children;
+  for (int i = 0; i < workers; ++i) {
+    auto pid = fork();
+    if (pid == 0) {
+      // Child: render pages into shared memory
+      auto* cdoc = FPDF_LoadDocument(pdf_path, nullptr);
+      if (!cdoc) std::exit(1);
+      while (true) {
+        int idx = ClaimNextPage(shared);
+        if (idx >= num_pages) break;
+        auto* page = FPDF_LoadPage(cdoc, idx);
+        if (!page) continue;
+        int w = infos[idx].w, h = infos[idx].h;
+        const auto stride = (w * 4 + 63) & ~63;
+        auto& pool = fast_png::GetProcessLocalPool();
+        auto* buffer = pool.Acquire(static_cast<size_t>(stride) * h);
+        if (!buffer) { FPDF_ClosePage(page); continue; }
+        auto* bitmap = FPDFBitmap_CreateEx(w, h, FPDFBitmap_BGRx, buffer, stride);
+        FPDFBitmap_FillRect(bitmap, 0, 0, w, h, 0xFFFFFFFF);
+        FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, 0, FPDF_ANNOT | FPDF_PRINTING | FPDF_NO_CATCH);
+        // Convert BGRA→BGR directly into shared memory
+        auto* dst = bgr_buf + infos[idx].bgr_offset;
+        for (int y = 0; y < h; ++y) {
+          const auto* row = buffer + y * stride;
+          for (int x = 0; x < w; ++x) { dst[0]=row[x*4]; dst[1]=row[x*4+1]; dst[2]=row[x*4+2]; dst+=3; }
+        }
+        FPDFBitmap_Destroy(bitmap);
+        FPDF_ClosePage(page);
+        slots[idx].ready.store(1, std::memory_order_release);
+        MarkCompleted(shared);
+      }
+      FPDF_CloseDocument(cdoc);
+      std::exit(0);
+    } else if (pid > 0) {
+      children.push_back(pid);
+    }
+  }
+
+  // Parent: write pages to stdout IN ORDER as they become ready
+  for (int i = 0; i < num_pages; ++i) {
+    // Spin-wait for page i (pages finish roughly in order)
+    while (slots[i].ready.load(std::memory_order_acquire) == 0) {
+      // Yield to avoid burning CPU
+      struct timespec ts = {0, 100000}; // 100us
+      nanosleep(&ts, nullptr);
+    }
+    auto w32 = static_cast<uint32_t>(slots[i].width);
+    auto h32 = static_cast<uint32_t>(slots[i].height);
+    std::fwrite(&w32, 4, 1, stdout);
+    std::fwrite(&h32, 4, 1, stdout);
+    std::fwrite(bgr_buf + slots[i].bgr_offset, 1, infos[i].bgr_size, stdout);
+  }
+
+  // Wait for all children
+  for (auto pid : children) waitpid(pid, nullptr, 0);
+  munmap(shared, sizeof(SharedState));
+  munmap(shm, shm_size);
+  std::fflush(stdout);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Daemon mode
 // ---------------------------------------------------------------------------
 
@@ -380,6 +541,17 @@ int main(int argc, char* argv[]) {
   if (argc == 2 && std::string_view{argv[1]} == "--daemon")
     return RunDaemon();
 
+  if (argc >= 3 && std::string_view{argv[1]} == "--raw-stdout") {
+    InitPdfium();
+    const auto* pdf = argv[2];
+    const auto dpi = (argc > 3) ? static_cast<float>(std::atof(argv[3])) : 150.0f;
+    const auto raw_workers = (argc > 4) ? std::atoi(argv[4]) : 4;
+    if (dpi <= 0 || dpi > kMaxDpi) { std::fprintf(stderr, "DPI must be 1-%.0f\n", kMaxDpi); FPDF_DestroyLibrary(); return 1; }
+    const auto rc = RenderRawStdout(pdf, dpi, std::clamp(raw_workers, 1, kMaxWorkers));
+    FPDF_DestroyLibrary();
+    return rc;
+  }
+
 #ifdef _WIN32
   if (argc == 7 && std::string_view{argv[1]} == "--worker") {
     const auto dpi = std::atoi(argv[4]) / 10.0f;
@@ -392,13 +564,14 @@ int main(int argc, char* argv[]) {
         "fastpdf2png - Ultra-fast PDF to PNG converter\n\n"
         "Usage:\n"
         "  %s input.pdf output_%%03d.png [dpi] [workers] [-c level]\n"
+        "  %s --raw-stdout input.pdf [dpi]\n"
         "  %s --info input.pdf\n"
         "  %s --daemon\n\n"
         "Options:\n"
         "  dpi       Resolution (default: 150)\n"
         "  workers   Parallel workers (default: 4)\n"
         "  -c level  0=fast, 1=medium, 2=best (default: 2)\n",
-        argv[0], argv[0], argv[0]);
+        argv[0], argv[0], argv[0], argv[0]);
     return 1;
   }
 
