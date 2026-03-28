@@ -100,6 +100,35 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+// Persistent worker pool — submit PDFs one at a time, workers process in parallel.
+// Workers stay alive until Pool is destroyed. Feed PDFs as they arrive.
+#ifndef _WIN32
+class FPDF2PNG_API Pool {
+public:
+    using Callback = std::function<void(std::string_view pdf_path,
+                                        std::vector<Page>& pages)>;
+
+    explicit Pool(int num_workers, Options opts = {}, Callback callback = {});
+    ~Pool();
+    Pool(const Pool&) = delete;
+    Pool& operator=(const Pool&) = delete;
+
+    // Submit a PDF for processing. Non-blocking — returns immediately.
+    void submit(const std::string& pdf_path);
+    void submit(const std::string& pdf_path, Callback callback);
+
+    // Wait for all submitted work to finish.
+    void wait();
+
+    // How many PDFs completed so far.
+    [[nodiscard]] int completed() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+#endif
+
 // C API for FFI (Python ctypes, Node ffi-napi, etc.)
 extern "C" {
 

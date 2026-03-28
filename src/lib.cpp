@@ -18,6 +18,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -391,6 +392,242 @@ int Engine::process_many(const std::vector<std::string>& pdf_paths,
     }
     return done;
 }
+#endif
+
+// --- Pool: persistent forked workers with pipe IPC ---
+
+#ifndef _WIN32
+
+namespace {
+
+struct PoolJob {
+    char pdf_path[512];
+    float dpi;
+    bool no_aa;
+    bool shutdown;  // true = worker should exit
+};
+
+struct PoolResult {
+    char pdf_path[512];
+    int pages_rendered;
+};
+
+[[noreturn]] void PoolWorkerLoop(int cmd_fd, int result_fd,
+                                  Pool::Callback default_cb) {
+    // Worker has its own PDFium via COW from parent fork
+    PoolJob job{};
+    while (true) {
+        // Block on pipe — zero CPU when idle
+        auto* p = reinterpret_cast<uint8_t*>(&job);
+        size_t remaining = sizeof(job);
+        while (remaining > 0) {
+            auto n = read(cmd_fd, p, remaining);
+            if (n <= 0) goto done;
+            p += n;
+            remaining -= n;
+        }
+
+        if (job.shutdown) break;
+
+        auto [fdata, fsize] = ReadFile(job.pdf_path);
+        FPDF_DOCUMENT doc = fdata ? FPDF_LoadMemDocument64(fdata, fsize, nullptr) : nullptr;
+
+        PoolResult result{};
+        std::strncpy(result.pdf_path, job.pdf_path, sizeof(result.pdf_path) - 1);
+
+        if (doc) {
+            auto pages = RenderDoc(doc, 0, FPDF_GetPageCount(doc), job.dpi, job.no_aa);
+            FPDF_CloseDocument(doc);
+            result.pages_rendered = static_cast<int>(pages.size());
+            if (default_cb) default_cb(job.pdf_path, pages);
+        }
+        std::free(fdata);
+
+        // Send result back (non-blocking for parent to collect)
+        auto* rp = reinterpret_cast<const uint8_t*>(&result);
+        size_t rrem = sizeof(result);
+        while (rrem > 0) {
+            auto n = write(result_fd, rp, rrem);
+            if (n <= 0) goto done;
+            rp += n;
+            rrem -= n;
+        }
+    }
+
+done:
+    close(cmd_fd);
+    close(result_fd);
+    _exit(0);
+}
+
+} // namespace
+
+struct Pool::Impl {
+    struct Worker {
+        pid_t pid;
+        int cmd_fd;
+        int result_fd;
+        int in_flight;
+    };
+
+    std::vector<Worker> workers;
+    Options opts;
+    Callback default_callback;
+    int submitted = 0;
+    int completed_count = 0;
+
+    // Pick worker with fewest in-flight jobs
+    int pick_worker() {
+        int best = 0;
+        for (int i = 1; i < static_cast<int>(workers.size()); ++i)
+            if (workers[i].in_flight < workers[best].in_flight) best = i;
+        return best;
+    }
+
+    // Drain ready results (non-blocking)
+    void drain() {
+        std::vector<struct pollfd> pfds(workers.size());
+        for (size_t i = 0; i < workers.size(); ++i)
+            pfds[i] = {workers[i].result_fd, POLLIN, 0};
+
+        while (true) {
+            int ready = poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 0);
+            if (ready <= 0) break;
+            for (size_t i = 0; i < workers.size(); ++i) {
+                if (pfds[i].revents & POLLIN) {
+                    PoolResult result{};
+                    auto* p = reinterpret_cast<uint8_t*>(&result);
+                    size_t rem = sizeof(result);
+                    bool ok = true;
+                    while (rem > 0) {
+                        auto n = read(workers[i].result_fd, p, rem);
+                        if (n <= 0) { ok = false; break; }
+                        p += n;
+                        rem -= n;
+                    }
+                    if (ok) {
+                        workers[i].in_flight--;
+                        completed_count++;
+                    }
+                }
+            }
+        }
+    }
+};
+
+Pool::Pool(int num_workers, Options opts, Callback callback)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->opts = opts;
+    impl_->default_callback = std::move(callback);
+
+    // Init PDFium in parent so workers inherit it via fork COW
+    FPDF_LIBRARY_CONFIG config{};
+    config.version = 2;
+    FPDF_InitLibraryWithConfig(&config);
+
+    num_workers = std::max(1, num_workers);
+    impl_->workers.resize(num_workers);
+
+    for (int i = 0; i < num_workers; ++i) {
+        int cmd_pipe[2], result_pipe[2];
+        if (pipe(cmd_pipe) != 0 || pipe(result_pipe) != 0) continue;
+
+        auto pid = fork();
+        if (pid == 0) {
+            // Child
+            close(cmd_pipe[1]);
+            close(result_pipe[0]);
+            for (int j = 0; j < i; ++j) {
+                close(impl_->workers[j].cmd_fd);
+                close(impl_->workers[j].result_fd);
+            }
+            PoolWorkerLoop(cmd_pipe[0], result_pipe[1], impl_->default_callback);
+        }
+
+        close(cmd_pipe[0]);
+        close(result_pipe[1]);
+        impl_->workers[i] = {pid, cmd_pipe[1], result_pipe[0], 0};
+    }
+}
+
+Pool::~Pool() {
+    // Send shutdown to all workers
+    for (auto& w : impl_->workers) {
+        PoolJob job{};
+        job.shutdown = true;
+        write(w.cmd_fd, &job, sizeof(job));
+        close(w.cmd_fd);
+    }
+    for (auto& w : impl_->workers) {
+        close(w.result_fd);
+        waitpid(w.pid, nullptr, 0);
+    }
+    FPDF_DestroyLibrary();
+}
+
+void Pool::submit(const std::string& pdf_path) {
+    // Drain completed results first to keep in_flight counts accurate
+    impl_->drain();
+
+    PoolJob job{};
+    std::strncpy(job.pdf_path, pdf_path.c_str(), sizeof(job.pdf_path) - 1);
+    job.dpi = impl_->opts.dpi;
+    job.no_aa = impl_->opts.no_aa;
+    job.shutdown = false;
+
+    int w = impl_->pick_worker();
+    auto* p = reinterpret_cast<const uint8_t*>(&job);
+    size_t rem = sizeof(job);
+    while (rem > 0) {
+        auto n = write(impl_->workers[w].cmd_fd, p, rem);
+        if (n <= 0) break;
+        p += n;
+        rem -= n;
+    }
+    impl_->workers[w].in_flight++;
+    impl_->submitted++;
+}
+
+void Pool::submit(const std::string& pdf_path, Callback) {
+    // Per-job callback not supported in fork model — use default callback
+    submit(pdf_path);
+}
+
+void Pool::wait() {
+    // Block-read remaining results using poll
+    while (impl_->completed_count < impl_->submitted) {
+        std::vector<struct pollfd> pfds(impl_->workers.size());
+        for (size_t i = 0; i < impl_->workers.size(); ++i)
+            pfds[i] = {impl_->workers[i].result_fd, POLLIN, 0};
+
+        int ready = poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 5000);
+        if (ready <= 0) continue;
+
+        for (size_t i = 0; i < impl_->workers.size(); ++i) {
+            if (pfds[i].revents & POLLIN) {
+                PoolResult result{};
+                auto* p = reinterpret_cast<uint8_t*>(&result);
+                size_t rem = sizeof(result);
+                bool ok = true;
+                while (rem > 0) {
+                    auto n = read(impl_->workers[i].result_fd, p, rem);
+                    if (n <= 0) { ok = false; break; }
+                    p += n;
+                    rem -= n;
+                }
+                if (ok) {
+                    impl_->workers[i].in_flight--;
+                    impl_->completed_count++;
+                }
+            }
+        }
+    }
+}
+
+int Pool::completed() const {
+    return impl_->completed_count;
+}
+
 #endif
 
 // --- C API ---
