@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -100,27 +101,41 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// Persistent worker pool — submit PDFs one at a time, workers process in parallel.
-// Workers stay alive until Pool is destroyed. Feed PDFs as they arrive.
+// Persistent worker pool — submit PDFs, get results as they complete.
+// Workers stay alive until Pool is destroyed.
+//
+//   Pool pool(8, {.dpi = 300});
+//   pool.submit("a.pdf");
+//   pool.submit("b.pdf");
+//   while (auto r = pool.next())       // blocks until one result ready
+//       for (auto& page : r->pages)
+//           ocr(page);
+//
 #ifndef _WIN32
+
+struct PoolResult {
+    std::string pdf_path;
+    std::vector<Page> pages;
+};
+
 class FPDF2PNG_API Pool {
 public:
-    using Callback = std::function<void(std::string_view pdf_path,
-                                        std::vector<Page>& pages)>;
-
-    explicit Pool(int num_workers, Options opts = {}, Callback callback = {});
+    explicit Pool(int num_workers, Options opts = {});
     ~Pool();
     Pool(const Pool&) = delete;
     Pool& operator=(const Pool&) = delete;
 
-    // Submit a PDF for processing. Non-blocking — returns immediately.
+    // Submit a PDF. Non-blocking.
     void submit(const std::string& pdf_path);
-    void submit(const std::string& pdf_path, Callback callback);
 
-    // Wait for all submitted work to finish.
-    void wait();
+    // Get next completed result. Blocks until one is ready.
+    // Returns nullopt when all submitted work is done (after finish()).
+    std::optional<PoolResult> next();
 
-    // How many PDFs completed so far.
+    // Signal no more submits — next() will return nullopt after last result.
+    void finish();
+
+    [[nodiscard]] int submitted() const;
     [[nodiscard]] int completed() const;
 
 private:
