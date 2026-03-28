@@ -16,17 +16,28 @@ constexpr int kErrorCompressFailed = 3;
 constexpr int kErrorFileOpenFailed = 4;
 constexpr int kErrorFileWriteFailed = 5;
 
+constexpr int kCompressRaw = -1;   // Raw PPM/PGM (no compression, max speed)
 constexpr int kCompressFast = 0;
 constexpr int kCompressMedium = 1;
 constexpr int kCompressBest = 2;
 
-// Write BGRA pixel buffer to PNG file.
-int WriteBgra(const char* filename,
+// Write RGBA pixel buffer to PNG file (use FPDF_REVERSE_BYTE_ORDER).
+int WriteRgba(const char* filename,
               const uint8_t* pixels,
               int width, int height, int stride,
               int compression_level = kCompressFast);
 
-// Write BGRA pixel buffer to PNG in memory.
+// Write RGBA pixel buffer to PNG in memory.
+int WriteRgbaToMemory(const uint8_t* pixels,
+                      int width, int height, int stride,
+                      uint8_t** out_data, size_t* out_size,
+                      int compression_level = kCompressFast);
+
+// Legacy BGRA wrappers (kept for compatibility).
+int WriteBgra(const char* filename,
+              const uint8_t* pixels,
+              int width, int height, int stride,
+              int compression_level = kCompressFast);
 int WriteBgraToMemory(const uint8_t* pixels,
                       int width, int height, int stride,
                       uint8_t** out_data, size_t* out_size,
