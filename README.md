@@ -41,6 +41,7 @@ for f in docs/*.pdf; do echo "$f\toutput/${f%.pdf}_%03d.png"; done | \
   ./build/fastpdf2png --pool 150 8 -c 2
 
 # Raw RGBA pixels to stdout (zero disk I/O, zero encoding)
+# Output format: [PixelHeader (4x int32: width, height, stride, channels)] + [RGBA pixels] per page
 ./build/fastpdf2png --raw input.pdf 150
 ```
 
@@ -53,16 +54,20 @@ import fastpdf2png
 images = fastpdf2png.to_images("doc.pdf")           # list of PIL images
 files  = fastpdf2png.to_files("doc.pdf", "output/")  # save PNGs to disk
 data   = fastpdf2png.to_bytes("doc.pdf")             # raw PNG bytes
-raw    = fastpdf2png.to_raw("doc.pdf")               # raw RGBA pixel buffers
+raw    = fastpdf2png.to_raw("doc.pdf")               # raw RGBA pixel buffers (dicts)
 n      = fastpdf2png.page_count("doc.pdf")           # page count
 
-# Many files — streaming worker pool, max throughput
+# Many files at once — single CLI invocation, all PDFs in parallel
+fastpdf2png.batch_to_files(pdf_list, "output/", dpi=150, workers=8)
+
+# High-throughput streaming — pre-forked worker pool
 with fastpdf2png.Engine(workers=8) as eng:
     eng.to_files_many(pdf_list, "output/", dpi=150)
 
     # Also works one at a time
     eng.to_files("single.pdf", "output/")
     imgs = eng.to_images("single.pdf", dpi=72)
+    data = eng.to_bytes("single.pdf")
     n    = eng.page_count("single.pdf")
 ```
 
@@ -72,13 +77,19 @@ with fastpdf2png.Engine(workers=8) as eng:
 from fastpdf2png.native import render, render_many, page_count
 
 # Single PDF — raw RGBA pixel buffers, no PNG encoding
-pages = render("doc.pdf", dpi=150)
+pages = render("doc.pdf", dpi=150, no_aa=False)
 for page in pages:
+    print(page.width, page.height, page.stride, page.channels)  # 4 = RGBA
     arr = page.to_numpy()   # (H, W, 4) RGBA numpy array
-    img = page.to_pil()     # PIL Image (RGB)
+    img = page.to_pil()     # PIL Image (RGB, alpha dropped)
+    raw = page.data         # raw bytes (stride * height)
 
-# Many PDFs in parallel
-results = render_many(pdf_paths, dpi=150, workers=8)
+# Many PDFs in parallel via ProcessPoolExecutor
+results = render_many(pdf_paths, dpi=150, no_aa=False, workers=8)
+# results[i] = list of PageBuffer for pdf_paths[i]
+
+# Page count without rendering
+n = page_count("doc.pdf")
 ```
 
 ### Node.js
@@ -90,9 +101,10 @@ pdf.toFiles("doc.pdf", "output/", { dpi: 150 });
 const buffers = pdf.toBuffers("doc.pdf");
 const count = pdf.pageCount("doc.pdf");
 
-// Streaming
+// Persistent engine — keeps PDFium loaded between calls
 const engine = new pdf.Engine();
 await engine.toFiles("doc.pdf", "output/");
+const bufs = engine.toBuffers("doc.pdf");
 engine.close();
 ```
 
@@ -104,35 +116,75 @@ engine.close();
 fpdf2png::Engine engine;
 
 // Render all pages to raw RGBA pixels
-auto result = engine.render("doc.pdf", {.dpi = 150});
+fpdf2png::Options opts{.dpi = 150, .no_aa = false, .workers = 0};
+auto result = engine.render("doc.pdf", opts);
 if (result) {
     for (auto& page : *result) {
-        // page.data.get() — raw RGBA pixels
-        // page.width, page.height, page.stride
-        auto pixels = page.pixels();  // std::span<const uint8_t>
+        // page.data.get()  — raw RGBA pixels (unique_ptr, auto-freed)
+        // page.width, page.height, page.stride (64-byte aligned)
+        auto pixels = page.pixels();   // std::span<const uint8_t> of full buffer
+        auto row0   = page.row(0);     // std::span<const uint8_t> of row 0
     }
+} else {
+    // result.error() returns fpdf2png::Error enum:
+    //   FileNotFound, InvalidPdf, RenderFailed, AllocFailed
 }
 
-// Render from memory
+// Render from in-memory PDF data (zero disk I/O)
+std::vector<uint8_t> pdf_data = load_file("doc.pdf");
 auto result = engine.render({pdf_data.data(), pdf_data.size()});
 
 // Render specific page range [start, end)
-auto result = engine.render_pages("doc.pdf", 0, 10);
+auto result = engine.render_pages("doc.pdf", 0, 10, opts);
 
-// Get page count without rendering
+// Get page count without rendering (from file or memory)
 int n = engine.page_count("doc.pdf");
+int m = engine.page_count({pdf_data.data(), pdf_data.size()});
+```
+
+### C API (for FFI — Python ctypes, Node ffi-napi, etc.)
+
+```c
+#include "fastpdf2png/lib.h"
+
+// Initialize PDFium (call once)
+fpdf2png_init();
+
+// Get page count
+int n = fpdf2png_page_count("doc.pdf");
+
+// Render all pages — returns array of {data, width, height, stride}
+fpdf2png_page_c* pages = NULL;
+int count = 0;
+int err = fpdf2png_render("doc.pdf", 150.0f, /*no_aa=*/0, &pages, &count);
+if (err == 0) {
+    for (int i = 0; i < count; i++) {
+        // pages[i].data   — RGBA pixels (width * 4 bytes per row, stride-aligned)
+        // pages[i].width, pages[i].height, pages[i].stride
+    }
+    fpdf2png_free(pages, count);  // free all page buffers + array
+}
+
+// Render from memory buffer
+fpdf2png_page_c* pages2 = NULL;
+int count2 = 0;
+fpdf2png_render_mem(pdf_bytes, pdf_size, 150.0f, 0, &pages2, &count2);
+fpdf2png_free(pages2, count2);
+
+// Shutdown PDFium (call once at exit)
+fpdf2png_shutdown();
 ```
 
 ## Performance
 
 Single 103-page text PDF (150 DPI, compression level 2, Apple M-series):
 
-| Workers | Pages/sec |
-|---------|-----------|
-| 1 | 165 |
-| 2 | 317 |
-| 4 | 546 |
-| 8 | **931** |
+| Workers | AA on | AA off |
+|---------|-------|--------|
+| 1 | 165 | 170 |
+| 2 | 317 | 313 |
+| 4 | 546 | 558 |
+| 8 | **931** | **881** |
 
 Streaming pool mode — 200 separate PDFs (324 total pages, 8 workers):
 
@@ -142,7 +194,9 @@ Streaming pool mode — 200 separate PDFs (324 total pages, 8 workers):
 | 150 | 189 | **334** |
 | 300 | 119 | 121 |
 
-Speed depends on page content complexity. Simple text pages render at 165 pg/s per core; pages with images and graphics render at 15-28 pg/s per core.
+Same PDF repeated 200 times via pool (20,600 pages, 8 workers, 150 DPI): **1,051 pages/sec** — workers cache the document, no re-parsing overhead.
+
+Speed depends on page content complexity. Simple text pages render at ~165 pg/s per core; pages with images and graphics render at 15-28 pg/s per core.
 
 Smaller output files for grayscale pages thanks to automatic grayscale detection.
 
@@ -198,7 +252,9 @@ fastpdf2png --daemon
 | `--info` | | Print page count |
 | `--daemon` | | Persistent mode (stdin commands) |
 
-Pool mode reads `pdf_path\toutput_pattern` lines from stdin, one per line.
+`--pool` (alias: `--batch`) reads `pdf_path\toutput_pattern` lines from stdin, one per line.
+
+`--raw` output format per page: 16-byte header (`int32 width, height, stride, channels`) followed by `stride * height` bytes of RGBA pixel data.
 
 ## Platforms
 
