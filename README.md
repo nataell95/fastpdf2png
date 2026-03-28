@@ -8,7 +8,7 @@
 
 # fastpdf2png
 
-Fast PDF to PNG converter. SIMD-optimized PNG encoding, automatic grayscale detection, multi-process scaling. MIT licensed.
+Ultra-fast PDF to PNG converter. Pre-forked worker pool, SIMD-optimized encoding, automatic grayscale detection, zero-copy RGBA rendering. MIT licensed.
 
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)]()
@@ -30,7 +30,12 @@ bash scripts/build.sh
 ### CLI
 
 ```bash
-./build/fastpdf2png input.pdf page_%03d.png 300 4 -c 2
+# Single PDF
+./build/fastpdf2png input.pdf page_%03d.png 150 8 -c 2
+
+# Streaming pool — many PDFs, max throughput
+for f in docs/*.pdf; do echo "$f\toutput/${f%.pdf}_%03d.png"; done | \
+  ./build/fastpdf2png --pool 150 8 -c 2
 ```
 
 ### Python
@@ -38,15 +43,20 @@ bash scripts/build.sh
 ```python
 import fastpdf2png
 
-images = fastpdf2png.to_images("doc.pdf")        # list of PIL images
-fastpdf2png.to_files("doc.pdf", "output/")        # save PNGs to disk
-data   = fastpdf2png.to_bytes("doc.pdf")          # raw PNG bytes
-n      = fastpdf2png.page_count("doc.pdf")        # page count
+# Single file
+images = fastpdf2png.to_images("doc.pdf")           # list of PIL images
+files  = fastpdf2png.to_files("doc.pdf", "output/")  # save PNGs to disk
+data   = fastpdf2png.to_bytes("doc.pdf")             # raw PNG bytes
+n      = fastpdf2png.page_count("doc.pdf")           # page count
 
-# Batch processing — keep PDFium loaded between calls
-with fastpdf2png.Engine() as pdf:
-    for path in my_pdfs:
-        images = pdf.to_images(path, dpi=150)
+# Many files — streaming worker pool, max throughput
+with fastpdf2png.Engine(workers=8) as eng:
+    eng.to_files_many(pdf_list, "output/", dpi=150)
+
+    # Also works one at a time
+    eng.to_files("single.pdf", "output/")
+    imgs = eng.to_images("single.pdf", dpi=72)
+    n    = eng.page_count("single.pdf")
 ```
 
 ### Node.js
@@ -58,7 +68,7 @@ pdf.toFiles("doc.pdf", "output/", { dpi: 150 });
 const buffers = pdf.toBuffers("doc.pdf");
 const count = pdf.pageCount("doc.pdf");
 
-// Batch processing
+// Streaming
 const engine = new pdf.Engine();
 await engine.toFiles("doc.pdf", "output/");
 engine.close();
@@ -66,13 +76,24 @@ engine.close();
 
 ## Performance
 
-<p align="center">
-  <img src=".github/assets/scaling.svg" alt="Worker scaling" width="680">
-</p>
+Worker scaling on a single 103-page PDF (150 DPI, compression level 2, Apple M-series):
 
-<p align="center">
-  <img src=".github/assets/benchmark.svg" alt="Benchmark" width="680">
-</p>
+| Workers | Pages/sec |
+|---------|-----------|
+| 1 | 141 |
+| 2 | 309 |
+| 4 | 555 |
+| 8 | **894** |
+
+Streaming pool mode — 200 separate PDFs (324 total pages, 150 DPI, 8 workers):
+
+| DPI | Pages/sec |
+|-----|-----------|
+| 72 | **574** |
+| 150 | **316** |
+| 300 | 101 |
+
+Smaller output files for grayscale pages thanks to automatic grayscale detection.
 
 ## How it works
 
@@ -82,7 +103,7 @@ engine.close();
 
 ### Rendering
 
-Google's [PDFium](https://pdfium.googlesource.com/pdfium/) (the engine inside Chromium) renders each page into a raw BGRA bitmap in memory. This gives us pixel-perfect output identical to what Chrome displays.
+Google's [PDFium](https://pdfium.googlesource.com/pdfium/) (the engine inside Chromium) renders each page into a raw RGBA bitmap using `FPDF_REVERSE_BYTE_ORDER`. This produces RGBA pixels directly — no BGRA-to-RGBA swizzle needed, and fpng can encode them with zero conversion overhead.
 
 ### Grayscale detection
 
@@ -90,20 +111,23 @@ Before encoding, a SIMD-accelerated pass scans every pixel to check if R == G ==
 
 ### PNG encoding
 
-Instead of the standard zlib/libpng pipeline, we use a patched [libdeflate](https://github.com/ebiggers/libdeflate) with a modified hash-skip optimization that skips redundant hash table insertions for long matches (+45% throughput). The compressed data goes directly into a pre-allocated output buffer — the PNG header, IDAT chunk, and IEND trailer are assembled around it with zero intermediate copies. CRC32 checksums are computed using hardware-accelerated instructions (CRC32 on ARM, PCLMUL on x86).
+Instead of the standard zlib/libpng pipeline, we use [libdeflate](https://github.com/ebiggers/libdeflate) for compression and [fpng](https://github.com/richgel999/fpng) for fast encoding. The compressed data goes directly into a pre-allocated output buffer — the PNG header, IDAT chunk, and IEND trailer are assembled around it with zero intermediate copies. CRC32 checksums use hardware-accelerated instructions (CRC32 on ARM, PCLMUL on x86). Each page is written with a single `write()` syscall.
 
-### Parallelism
+### Pool mode
 
-PDFium is not thread-safe, so we use `fork()` to create isolated worker processes. Each worker shares a single atomic page counter via `mmap`'d shared memory — workers grab the next unprocessed page with `fetch_add`, render it, and write the PNG to disk. Copy-on-write semantics mean the PDFium library and document data are shared across workers without duplicating memory.
+The `--pool` command pre-forks N worker processes at startup. Workers stay alive and wait for jobs on pipes (zero CPU waste when idle). The parent reads PDF paths from stdin and dispatches them immediately to workers via pipe IPC. Large multi-page PDFs are automatically split into page ranges across workers for load balancing. Each worker loads PDFs into memory with `read()` and parses them with `FPDF_LoadMemDocument64`, eliminating syscalls during PDF parsing.
 
-### Thread-local pools
+On Windows, pool mode uses `CreateProcess` with anonymous pipes — same architecture, Win32 APIs.
 
-Each worker maintains thread-local memory pools for pixel buffers and compression scratch space. After the first page warms up the pools, subsequent pages require zero `malloc`/`free` calls in the hot path.
+### Memory pools
+
+Each worker maintains process-local memory pools for pixel buffers and compression scratch space. After the first page warms up the pools, subsequent pages require zero `malloc`/`free` calls in the hot path.
 
 ## CLI reference
 
 ```
 fastpdf2png <input.pdf> <output_%03d.png> [dpi] [workers] [-c level]
+fastpdf2png --pool [dpi] [workers] [-c level]    < job_list
 fastpdf2png --info <input.pdf>
 fastpdf2png --daemon
 ```
@@ -112,21 +136,26 @@ fastpdf2png --daemon
 |------|---------|-------------|
 | `dpi` | 150 | Output resolution |
 | `workers` | 4 | Parallel processes |
-| `-c 0/1/2` | 2 | Compression: fast / medium / best |
+| `-c -1` | | Raw PPM/PGM output (no compression, max speed) |
+| `-c 0` | | Fast PNG (fpng) |
+| `-c 1` | | Medium PNG (fpng slower) |
+| `-c 2` | 2 | Best PNG (libdeflate, smallest files) |
+| `--pool` | | Streaming worker pool (reads jobs from stdin) |
 | `--info` | | Print page count |
 | `--daemon` | | Persistent mode (stdin commands) |
 
+Pool mode reads `pdf_path\toutput_pattern` lines from stdin, one per line.
+
 ## Platforms
 
-| OS | Arch | SIMD |
-|----|------|------|
-| macOS | arm64 | NEON |
-| macOS | x86_64 | AVX2, SSE4.1 |
-| Linux | x86_64 | AVX2, SSE4.1 |
-| Linux | arm64 | NEON |
-| Windows | x86_64 | AVX2, SSE4.1 |
+| OS | Arch | SIMD | Pool mode |
+|----|------|------|-----------|
+| macOS | arm64 | NEON | fork + pipes |
+| macOS | x86_64 | AVX2, SSE4.1 | fork + pipes |
+| Linux | x86_64 | AVX2, SSE4.1 | fork + pipes |
+| Linux | arm64 | NEON | fork + pipes |
+| Windows | x86_64 | AVX2, SSE4.1 | CreateProcess + pipes |
 
 ## License
 
 MIT. See [LICENSE](LICENSE) and [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
-

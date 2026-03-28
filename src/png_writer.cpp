@@ -4,6 +4,7 @@
 #include "png_writer.h"
 #include "memory_pool.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -141,9 +142,33 @@ void BgraToRgba(const uint8_t* src, uint8_t* dst, int width, int height, int src
 #endif
 
 // ---------------------------------------------------------------------------
-// BGRA → RGB row conversion
+// RGBA → RGB row conversion (just drop alpha, no swap needed)
 // ---------------------------------------------------------------------------
 
+inline void ConvertRowRgbaToRgb(uint8_t* dst, const uint8_t* src, int width) {
+  int x = 0;
+#if USE_NEON
+  for (; x + 16 <= width; x += 16) {
+    auto rgba = vld4q_u8(src + x * 4);
+    uint8x16x3_t rgb = { rgba.val[0], rgba.val[1], rgba.val[2] };
+    vst3q_u8(dst + x * 3, rgb);
+  }
+#elif USE_SSE
+  const auto shuf = _mm_setr_epi8(0,1,2, 4,5,6, 8,9,10, 12,13,14, -1,-1,-1,-1);
+  for (; x + 4 <= width; x += 4) {
+    auto p = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + x * 4));
+    auto rgb = _mm_shuffle_epi8(p, shuf);
+    uint8_t tmp[16];
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(tmp), rgb);
+    std::memcpy(dst + x * 3, tmp, 12);
+  }
+#endif
+  for (; x < width; x++) {
+    dst[x*3] = src[x*4]; dst[x*3+1] = src[x*4+1]; dst[x*3+2] = src[x*4+2];
+  }
+}
+
+// BGRA → RGB (legacy, with swap)
 inline void ConvertRowBgraToRgb(uint8_t* dst, const uint8_t* src, int width) {
   int x = 0;
 #if USE_NEON
@@ -203,6 +228,35 @@ bool IsImageGrayscale(const uint8_t* pixels, int width, int height, int stride) 
 // Raw PNG data preparation
 // ---------------------------------------------------------------------------
 
+// RGBA input: grayscale = take R channel (byte 0)
+void PrepareGrayscaleRgba(uint8_t* raw, const uint8_t* pixels, int width, int height, int stride) {
+  const auto row_bytes = 1 + static_cast<size_t>(width);
+  for (int y = 0; y < height; y++) {
+    raw[y * row_bytes] = 0;
+    auto* dst = raw + y * row_bytes + 1;
+    auto* src = pixels + y * stride;
+    int x = 0;
+#if USE_NEON
+    for (; x + 16 <= width; x += 16) {
+      auto rgba = vld4q_u8(src + x * 4);
+      vst1q_u8(dst + x, rgba.val[0]);
+    }
+#endif
+    for (; x < width; x++)
+      dst[x] = src[x * 4];
+  }
+}
+
+// RGBA input: RGB = just drop alpha
+void PrepareRgbFromRgba(uint8_t* raw, const uint8_t* pixels, int width, int height, int stride) {
+  const auto row_bytes = 1 + static_cast<size_t>(width) * 3;
+  for (int y = 0; y < height; y++) {
+    raw[y * row_bytes] = 0;
+    ConvertRowRgbaToRgb(raw + y * row_bytes + 1, pixels + y * stride, width);
+  }
+}
+
+// Legacy BGRA versions
 void PrepareGrayscale(uint8_t* raw, const uint8_t* pixels, int width, int height, int stride) {
   const auto row_bytes = 1 + static_cast<size_t>(width);
   for (int y = 0; y < height; y++) {
@@ -352,6 +406,86 @@ int EncodeLibdeflateToMemory(const uint8_t* pixels, int width, int height,
   return fast_png::kSuccess;
 }
 
+// ---------------------------------------------------------------------------
+// Raw PPM/PGM output (zero compression, max throughput)
+// Grayscale → PGM (P5), Color → PPM (P6)
+// ---------------------------------------------------------------------------
+
+int WriteRawPpm(const char* filename, const uint8_t* pixels,
+                int width, int height, int stride) {
+  const bool gray = IsImageGrayscale(pixels, width, height, stride);
+
+  // Build header
+  char header[64];
+  int hlen;
+  if (gray)
+    hlen = std::snprintf(header, sizeof(header), "P5\n%d %d\n255\n", width, height);
+  else
+    hlen = std::snprintf(header, sizeof(header), "P6\n%d %d\n255\n", width, height);
+
+  const size_t pixel_bytes = gray
+      ? static_cast<size_t>(width) * height
+      : static_cast<size_t>(width) * height * 3;
+  const size_t total = hlen + pixel_bytes;
+
+  auto& bufs = GetBuffers();
+  auto* out = bufs.AcquireRaw(total);
+  if (!out) return fast_png::kErrorAllocFailed;
+
+  std::memcpy(out, header, hlen);
+  auto* dst = out + hlen;
+
+  if (gray) {
+    for (int y = 0; y < height; y++) {
+      auto* src = pixels + y * stride;
+      auto* row = dst + y * width;
+      int x = 0;
+#if USE_NEON
+      for (; x + 16 <= width; x += 16) {
+        auto rgba = vld4q_u8(src + x * 4);
+        vst1q_u8(row + x, rgba.val[0]);
+      }
+#endif
+      for (; x < width; x++)
+        row[x] = src[x * 4];
+    }
+  } else {
+    for (int y = 0; y < height; y++)
+      ConvertRowRgbaToRgb(dst + y * width * 3, pixels + y * stride, width);
+  }
+
+  return WriteFile(filename, out, total);
+}
+
+// RGBA-native libdeflate encode (no BGRA→RGBA swizzle needed)
+int EncodeLibdeflateRgba(const char* filename, const uint8_t* pixels,
+                          int width, int height, int stride) {
+  const bool gray = IsImageGrayscale(pixels, width, height, stride);
+  const int color_type = gray ? 0 : 2;
+  const size_t row_bytes = 1 + static_cast<size_t>(width) * (gray ? 1 : 3);
+  const size_t raw_size = row_bytes * height;
+
+  auto& bufs = GetBuffers();
+  auto* raw = bufs.AcquireRaw(raw_size);
+  if (!raw) return fast_png::kErrorAllocFailed;
+
+  if (gray) PrepareGrayscaleRgba(raw, pixels, width, height, stride);
+  else      PrepareRgbFromRgba(raw, pixels, width, height, stride);
+
+  auto* c = GetCompressor();
+  if (!c) return fast_png::kErrorAllocFailed;
+
+  const size_t bound = libdeflate_zlib_compress_bound(c, raw_size);
+  auto* out = bufs.AcquireComp(kHeaderSize + bound + kTrailerSize);
+  if (!out) return fast_png::kErrorAllocFailed;
+
+  const size_t comp = libdeflate_zlib_compress(c, raw, raw_size, out + kHeaderSize, bound);
+  if (comp == 0) return fast_png::kErrorCompressFailed;
+
+  const size_t png_size = AssemblePng(out, width, height, comp, color_type);
+  return WriteFile(filename, out, png_size);
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -359,6 +493,45 @@ int EncodeLibdeflateToMemory(const uint8_t* pixels, int width, int height,
 // ---------------------------------------------------------------------------
 
 namespace fast_png {
+
+int WriteRgba(const char* filename, const uint8_t* pixels,
+              int width, int height, int stride, int compression_level) {
+  if (!filename || !pixels || width <= 0 || height <= 0)
+    return kErrorInvalidParams;
+
+  if (compression_level == kCompressRaw)
+    return WriteRawPpm(filename, pixels, width, height, stride);
+
+  if (compression_level == kCompressBest)
+    return EncodeLibdeflateRgba(filename, pixels, width, height, stride);
+
+  // fpng natively accepts RGBA — feed directly, NO conversion needed
+  EnsureFpngInit();
+  int flags = (compression_level >= kCompressMedium) ? fpng::FPNG_ENCODE_SLOWER : 0;
+  return fpng::fpng_encode_image_to_file(filename, pixels, width, height, 4, flags)
+             ? kSuccess : kErrorCompressFailed;
+}
+
+int WriteRgbaToMemory(const uint8_t* pixels, int width, int height,
+                      int stride, uint8_t** out_data, size_t* out_size,
+                      int compression_level) {
+  if (!pixels || width <= 0 || height <= 0 || !out_data || !out_size)
+    return kErrorInvalidParams;
+
+  // For kCompressBest, use libdeflate with RGBA-native path
+  // For fpng: feed RGBA directly, no conversion
+  EnsureFpngInit();
+  int flags = (compression_level >= kCompressMedium) ? fpng::FPNG_ENCODE_SLOWER : 0;
+  std::vector<uint8_t> buf;
+  if (!fpng::fpng_encode_image_to_memory(pixels, width, height, 4, buf, flags))
+    return kErrorCompressFailed;
+
+  *out_size = buf.size();
+  *out_data = static_cast<uint8_t*>(std::malloc(*out_size));
+  if (!*out_data) { *out_size = 0; return kErrorAllocFailed; }
+  std::memcpy(*out_data, buf.data(), *out_size);
+  return kSuccess;
+}
 
 int WriteBgra(const char* filename, const uint8_t* pixels,
               int width, int height, int stride, int compression_level) {

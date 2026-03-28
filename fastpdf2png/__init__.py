@@ -8,13 +8,12 @@ fastpdf2png — Ultra-fast PDF to PNG converter.
     data   = fastpdf2png.to_bytes("doc.pdf")             # raw PNG bytes
     n      = fastpdf2png.page_count("doc.pdf")           # number of pages
 
-    # Batch processing (keeps engine warm):
-    with fastpdf2png.Engine() as pdf:
-        for path in my_files:
-            images = pdf.to_images(path)
+    # High-throughput streaming:
+    with fastpdf2png.Engine(workers=8) as eng:
+        eng.to_files_many(pdf_list, "output/")
 """
 
-from .converter import to_images, to_files, to_bytes, page_count, Engine
+from .converter import to_images, to_files, to_bytes, page_count, batch_to_files, Engine
 
-__version__ = "1.3.1"
-__all__ = ["to_images", "to_files", "to_bytes", "page_count", "Engine"]
+__version__ = "2.0.0"
+__all__ = ["to_images", "to_files", "to_bytes", "page_count", "batch_to_files", "Engine"]
