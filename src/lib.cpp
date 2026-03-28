@@ -641,6 +641,15 @@ std::optional<PoolResult> Pool::next() {
     if (!impl_->shared) return std::nullopt;
     if (impl_->complete_count >= impl_->submit_count) return std::nullopt;
 
+    // Reset pixel buffer when we've caught up with all completed work.
+    // At this point all pixels from prior results have been copied out by next(),
+    // and no worker is writing (done == complete_count means all finished results
+    // have been read). Workers currently rendering will allocate from offset 0 again.
+    int done_now = impl_->shared->done.load(std::memory_order_acquire);
+    if (done_now > 0 && done_now == impl_->complete_count) {
+        impl_->shared->pixel_alloc.store(0, std::memory_order_release);
+    }
+
     // Poll all worker result pipes — block until one has data
     auto nw = static_cast<int>(impl_->workers.size());
     std::vector<struct pollfd> pfds(nw);
