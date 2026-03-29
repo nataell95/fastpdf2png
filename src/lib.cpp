@@ -11,6 +11,7 @@
 #include <cstring>
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <string>
 
 #ifdef _WIN32
@@ -449,9 +450,11 @@ struct Pool::Impl {
     struct WorkerInfo { pid_t pid; int result_rd; };
     std::vector<WorkerInfo> workers;
     Options opts;
-    int submit_count = 0;
-    int complete_count = 0;
-    bool finished = false;
+    std::atomic<int> submit_count{0};
+    std::atomic<int> complete_count{0};
+    std::atomic<bool> finished{false};
+    std::mutex submit_mtx;  // protects job_slots write + submit_count increment
+    std::mutex next_mtx;    // protects pipe reads + complete_count increment
 };
 
 Pool::Pool(int num_workers, Options opts)
@@ -619,6 +622,7 @@ Pool::~Pool() {
 }
 
 void Pool::submit(const std::string& pdf_path) {
+    std::lock_guard<std::mutex> lock(impl_->submit_mtx);
     if (!impl_->shared || impl_->finished) return;
 
     int idx = impl_->submit_count;
@@ -636,6 +640,7 @@ void Pool::submit(const std::string& pdf_path) {
 }
 
 std::optional<PoolResult> Pool::next() {
+    std::lock_guard<std::mutex> lock(impl_->next_mtx);
     if (!impl_->shared) return std::nullopt;
     if (impl_->complete_count >= impl_->submit_count) return std::nullopt;
 
@@ -704,11 +709,17 @@ std::optional<PoolResult> Pool::next() {
 }
 
 void Pool::finish() {
+    std::lock_guard<std::mutex> lock(impl_->submit_mtx);
     impl_->finished = true;
 }
 
-int Pool::submitted() const { return impl_->submit_count; }
-int Pool::completed() const { return impl_->complete_count; }
+int Pool::submitted() const {
+    return impl_->submit_count.load(std::memory_order_acquire);
+}
+
+int Pool::completed() const {
+    return impl_->complete_count.load(std::memory_order_acquire);
+}
 
 #endif
 
