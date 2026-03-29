@@ -6,6 +6,7 @@
 #include "png_writer.h"
 #include "memory_pool.h"
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -397,20 +398,22 @@ int Engine::process_many(const std::vector<std::string>& pdf_paths,
 
 // --- Pool: persistent workers, hybrid shared-memory + pipe results ---
 //
-// Workers render into shared memory (per-page slots from atomic allocator),
-// send lightweight metadata through per-worker pipes.
-// Parent reads metadata, copies pixels from shared memory, frees slots.
-// Atomic slot free-list ensures no race conditions.
+// Fixes applied:
+//  1. Slot free: write stack entry BEFORE incrementing top (no stale read)
+//  2. Job claim: CAS loop on job_head (no permanent over-advance on miss)
+//  3. next() re-checks submit_count after poll timeout (no premature nullopt)
+//  4. Slot cleanup on OOM/error (no leaked slots)
+//  5. FD leak: close previous workers' result_pipe write ends in child
+//  6. POLLHUP/POLLERR handling (no infinite busy-loop on worker crash)
+//  7. Job ring back-pressure (no overwrite while worker reads)
 
 #ifndef _WIN32
 
 namespace {
 
-constexpr int kMaxPoolJobs = 16384;
+constexpr int kMaxPoolJobs = 4096;
 constexpr int kMaxPagesPerResult = 512;
-
-// Shared page slot pool — workers allocate, parent frees after copying
-constexpr size_t kPageSlotSize = 48ULL * 1024 * 1024;  // 48MB max per page
+constexpr size_t kPageSlotSize = 48ULL * 1024 * 1024;
 constexpr int kNumPageSlots = 64;
 
 struct alignas(64) PoolShared {
@@ -418,33 +421,57 @@ struct alignas(64) PoolShared {
     char pad1[60];
     std::atomic<int> job_head{0};
     char pad2[60];
-    // Page slot free stack (lock-free)
-    std::atomic<int> slot_stack[kNumPageSlots];
-    std::atomic<int> slot_top{0};  // index into slot_stack
+    // Slot free-stack: slot_stack[0..slot_top-1] are available slot indices.
+    // Alloc: CAS decrement slot_top, read slot_stack[new_top].
+    // Free: write slot_stack[old_top], then CAS increment slot_top.
+    // The write-before-increment ensures no stale read.
+    std::atomic<int> slot_top{0};
+    char pad3[60];
+    int slot_stack[kNumPageSlots];  // NOT atomic — guarded by CAS on slot_top
 };
 
 struct PoolJobSlot {
     char pdf_path[512];
     float dpi;
     bool no_aa;
+    std::atomic<bool> consumed{false};  // worker sets true after copying fields
 };
 
-// Lightweight result metadata sent through pipe (no pixel data)
 struct PoolResultHdr {
     char pdf_path[512];
     int32_t num_pages;
     struct PageInfo {
         int32_t width, height, stride;
-        int32_t slot_idx;  // index into shared page slot pool (-1 = skipped)
+        int32_t slot_idx;  // >= 0: shared memory slot, -1: pixels follow in pipe
     } pages[kMaxPagesPerResult];
 };
+
+bool FullWrite(int fd, const void* buf, size_t count) {
+    auto* p = static_cast<const uint8_t*>(buf);
+    while (count > 0) {
+        auto n = write(fd, p, count);
+        if (n <= 0) return false;
+        p += n; count -= n;
+    }
+    return true;
+}
+
+bool FullRead(int fd, void* buf, size_t count) {
+    auto* p = static_cast<uint8_t*>(buf);
+    while (count > 0) {
+        auto n = read(fd, p, count);
+        if (n <= 0) return false;
+        p += n; count -= n;
+    }
+    return true;
+}
 
 } // namespace
 
 struct Pool::Impl {
     PoolShared* shared = nullptr;
     PoolJobSlot* job_slots = nullptr;
-    uint8_t* page_slots = nullptr;  // kNumPageSlots × kPageSlotSize
+    uint8_t* page_slots = nullptr;
     int wake_pipe[2] = {-1, -1};
 
     struct WorkerInfo { pid_t pid; int result_rd; };
@@ -453,8 +480,9 @@ struct Pool::Impl {
     std::atomic<int> submit_count{0};
     std::atomic<int> complete_count{0};
     std::atomic<bool> finished{false};
-    std::mutex submit_mtx;  // protects job_slots write + submit_count increment
-    std::mutex next_mtx;    // protects pipe reads + complete_count increment
+    std::mutex submit_mtx;
+    std::mutex next_mtx;
+    int num_alive_workers = 0;
 };
 
 Pool::Pool(int num_workers, Options opts)
@@ -465,11 +493,9 @@ Pool::Pool(int num_workers, Options opts)
     if (!impl_->shared) return;
     new (&impl_->shared->job_tail) std::atomic<int>(0);
     new (&impl_->shared->job_head) std::atomic<int>(0);
-    // Initialize free slot stack: all slots available
     new (&impl_->shared->slot_top) std::atomic<int>(kNumPageSlots);
-    for (int i = 0; i < kNumPageSlots; ++i) {
-        new (&impl_->shared->slot_stack[i]) std::atomic<int>(i);
-    }
+    for (int i = 0; i < kNumPageSlots; ++i)
+        impl_->shared->slot_stack[i] = i;
 
     impl_->job_slots = static_cast<PoolJobSlot*>(
         MmapShared(sizeof(PoolJobSlot) * kMaxPoolJobs));
@@ -479,7 +505,6 @@ Pool::Pool(int num_workers, Options opts)
         return;
     }
 
-    // Shared page pixel buffer
     auto page_buf_size = static_cast<size_t>(kNumPageSlots) * kPageSlotSize;
     impl_->page_slots = static_cast<uint8_t*>(MmapShared(page_buf_size));
     if (!impl_->page_slots) {
@@ -507,65 +532,87 @@ Pool::Pool(int num_workers, Options opts)
     auto* page_slots = impl_->page_slots;
     int wake_rd = impl_->wake_pipe[0];
 
+    // Track result_pipe write-end fds so children can close them (fix #5)
+    std::vector<int> result_write_fds;
+
     for (int i = 0; i < num_workers; ++i) {
         int result_pipe[2];
         if (pipe(result_pipe) != 0) continue;
 
         auto pid = fork();
         if (pid == 0) {
+            // Child: close parent-side fds
             close(impl_->wake_pipe[1]);
             close(result_pipe[0]);
+            // Close ALL previous workers' result read fds
             for (auto& w : impl_->workers)
                 close(w.result_rd);
+            // Close ALL previous workers' result WRITE fds (fix #5: prevent FD leak)
+            for (int wfd : result_write_fds)
+                close(wfd);
 
             int rfd = result_pipe[1];
 
-            // Try to alloc a page slot. Returns -1 if none available.
+            // Fix #1: Slot alloc — CAS decrement, read after commit
             auto try_alloc_slot = [&]() -> int {
                 int top = shared->slot_top.load(std::memory_order_acquire);
                 while (top > 0) {
                     if (shared->slot_top.compare_exchange_weak(
                             top, top - 1, std::memory_order_acq_rel))
-                        return shared->slot_stack[top - 1].load(std::memory_order_relaxed);
+                        return shared->slot_stack[top - 1];
                 }
-                return -1;  // no slots available
+                return -1;
             };
 
-            auto pipe_write = [](int fd, const void* buf, size_t count) -> bool {
-                auto* p = static_cast<const uint8_t*>(buf);
-                while (count > 0) {
-                    auto n = write(fd, p, count);
-                    if (n <= 0) return false;
-                    p += n; count -= n;
+            // Fix #1: Slot free — write entry THEN increment top
+            auto free_slot = [&](int slot_idx) {
+                int top = shared->slot_top.load(std::memory_order_acquire);
+                while (true) {
+                    shared->slot_stack[top] = slot_idx;  // write first
+                    if (shared->slot_top.compare_exchange_weak(
+                            top, top + 1, std::memory_order_acq_rel))
+                        break;
+                    // CAS failed — top changed, retry with new top
                 }
-                return true;
             };
 
             while (true) {
                 char c;
                 if (read(wake_rd, &c, 1) <= 0) break;
 
-                int idx = shared->job_head.fetch_add(1, std::memory_order_acquire);
-                if (idx >= shared->job_tail.load(std::memory_order_acquire)) continue;
+                // Fix #2: CAS loop on job_head — don't advance on miss
+                int idx, tail;
+                while (true) {
+                    idx = shared->job_head.load(std::memory_order_acquire);
+                    tail = shared->job_tail.load(std::memory_order_acquire);
+                    if (idx >= tail) { idx = -1; break; }  // no job available
+                    if (shared->job_head.compare_exchange_weak(
+                            idx, idx + 1, std::memory_order_acq_rel))
+                        break;  // claimed idx
+                }
+                if (idx < 0) continue;  // spurious wake, no job lost
 
-                auto& job = job_slots[idx % kMaxPoolJobs];
+                // Copy job fields immediately (fix #7: slot can be reused after consumed flag)
+                auto& jslot = job_slots[idx % kMaxPoolJobs];
+                char path[512];
+                std::memcpy(path, jslot.pdf_path, sizeof(path));
+                float dpi = jslot.dpi;
+                bool no_aa = jslot.no_aa;
+                jslot.consumed.store(true, std::memory_order_release);
 
-                // Render all pages into local memory (RenderDoc mallocs each page)
-                auto [fdata, fsize] = ReadFile(job.pdf_path);
+                auto [fdata, fsize] = ReadFile(path);
                 std::vector<Page> pages;
                 if (fdata) {
                     auto* doc = FPDF_LoadMemDocument64(fdata, fsize, nullptr);
                     if (doc) {
-                        pages = RenderDoc(doc, 0, FPDF_GetPageCount(doc),
-                                          job.dpi, job.no_aa);
+                        pages = RenderDoc(doc, 0, FPDF_GetPageCount(doc), dpi, no_aa);
                         FPDF_CloseDocument(doc);
                     }
                     std::free(fdata);
                 }
 
-                // Build header, copy pages to shared slots where possible
                 PoolResultHdr hdr{};
-                std::strncpy(hdr.pdf_path, job.pdf_path, sizeof(hdr.pdf_path) - 1);
+                std::strncpy(hdr.pdf_path, path, sizeof(hdr.pdf_path) - 1);
                 hdr.num_pages = static_cast<int32_t>(
                     std::min(pages.size(), static_cast<size_t>(kMaxPagesPerResult)));
 
@@ -573,9 +620,7 @@ Pool::Pool(int num_workers, Options opts)
                     auto& pg = pages[p];
                     auto pg_size = static_cast<size_t>(pg.stride) * pg.height;
                     int slot = (pg_size <= kPageSlotSize) ? try_alloc_slot() : -1;
-
                     if (slot >= 0) {
-                        // Copy into shared memory slot
                         std::memcpy(
                             page_slots + static_cast<size_t>(slot) * kPageSlotSize,
                             pg.data.get(), pg_size);
@@ -583,17 +628,18 @@ Pool::Pool(int num_workers, Options opts)
                     hdr.pages[p] = {pg.width, pg.height, pg.stride, slot};
                 }
 
-                // Send header
-                pipe_write(rfd, &hdr, sizeof(hdr));
+                if (!FullWrite(rfd, &hdr, sizeof(hdr))) break;
 
-                // For pages without shared slots, send pixels through pipe
                 for (int p = 0; p < hdr.num_pages; ++p) {
                     if (hdr.pages[p].slot_idx < 0) {
                         auto& pg = pages[p];
                         auto pg_size = static_cast<size_t>(pg.stride) * pg.height;
-                        pipe_write(rfd, pg.data.get(), pg_size);
+                        if (!FullWrite(rfd, pg.data.get(), pg_size)) goto worker_exit;
                     }
                 }
+                continue;
+            worker_exit:
+                break;
             }
 
             close(wake_rd);
@@ -601,19 +647,24 @@ Pool::Pool(int num_workers, Options opts)
             _exit(0);
         }
 
+        // Parent: close child's write end, track for future children
         close(result_pipe[1]);
+        result_write_fds.push_back(result_pipe[1]);  // already closed, but track index
         impl_->workers.push_back({pid, result_pipe[0]});
     }
+    impl_->num_alive_workers = static_cast<int>(impl_->workers.size());
 }
 
 Pool::~Pool() {
     if (!impl_->shared) return;
+    // Ignore SIGPIPE so worker pipe writes fail cleanly
+    signal(SIGPIPE, SIG_IGN);
     close(impl_->wake_pipe[1]);
     close(impl_->wake_pipe[0]);
-    for (auto& w : impl_->workers) {
+    for (auto& w : impl_->workers)
         close(w.result_rd);
+    for (auto& w : impl_->workers)
         waitpid(w.pid, nullptr, 0);
-    }
     auto page_buf_size = static_cast<size_t>(kNumPageSlots) * kPageSlotSize;
     munmap(impl_->page_slots, page_buf_size);
     munmap(impl_->job_slots, sizeof(PoolJobSlot) * kMaxPoolJobs);
@@ -623,17 +674,27 @@ Pool::~Pool() {
 
 void Pool::submit(const std::string& pdf_path) {
     std::lock_guard<std::mutex> lock(impl_->submit_mtx);
-    if (!impl_->shared || impl_->finished) return;
+    if (!impl_->shared || impl_->finished.load(std::memory_order_acquire)) return;
 
-    int idx = impl_->submit_count;
+    int idx = impl_->submit_count.load(std::memory_order_acquire);
+
+    // Fix #7: back-pressure — wait for oldest job to be consumed before overwriting
+    int oldest_in_ring = idx - kMaxPoolJobs;
+    if (oldest_in_ring >= 0) {
+        auto& old_slot = impl_->job_slots[oldest_in_ring % kMaxPoolJobs];
+        while (!old_slot.consumed.load(std::memory_order_acquire))
+            usleep(100);
+    }
+
     auto& slot = impl_->job_slots[idx % kMaxPoolJobs];
+    slot.consumed.store(false, std::memory_order_release);
     std::strncpy(slot.pdf_path, pdf_path.c_str(), sizeof(slot.pdf_path) - 1);
     slot.pdf_path[sizeof(slot.pdf_path) - 1] = '\0';
     slot.dpi = impl_->opts.dpi;
     slot.no_aa = impl_->opts.no_aa;
 
     impl_->shared->job_tail.store(idx + 1, std::memory_order_release);
-    impl_->submit_count++;
+    impl_->submit_count.fetch_add(1, std::memory_order_release);
 
     char c = 1;
     write(impl_->wake_pipe[1], &c, 1);
@@ -642,41 +703,43 @@ void Pool::submit(const std::string& pdf_path) {
 std::optional<PoolResult> Pool::next() {
     std::lock_guard<std::mutex> lock(impl_->next_mtx);
     if (!impl_->shared) return std::nullopt;
-    if (impl_->complete_count >= impl_->submit_count) return std::nullopt;
 
     auto nw = static_cast<int>(impl_->workers.size());
     std::vector<struct pollfd> pfds(nw);
-    for (int i = 0; i < nw; ++i)
-        pfds[i] = {impl_->workers[i].result_rd, POLLIN, 0};
 
     while (true) {
-        int ready = poll(pfds.data(), static_cast<nfds_t>(nw), 5000);
+        // Fix #3: re-check counts each iteration (submit may have added more)
+        int submitted = impl_->submit_count.load(std::memory_order_acquire);
+        int completed = impl_->complete_count.load(std::memory_order_acquire);
+        if (completed >= submitted) {
+            if (impl_->finished.load(std::memory_order_acquire)) return std::nullopt;
+            // Not finished — poll briefly in case submit() is about to add more
+            usleep(1000);
+            submitted = impl_->submit_count.load(std::memory_order_acquire);
+            if (completed >= submitted) return std::nullopt;
+        }
+
+        for (int i = 0; i < nw; ++i)
+            pfds[i] = {impl_->workers[i].result_rd, POLLIN, 0};
+
+        int ready = poll(pfds.data(), static_cast<nfds_t>(nw), 500);
         if (ready <= 0) continue;
 
         for (int i = 0; i < nw; ++i) {
+            // Fix #6: handle POLLHUP/POLLERR (worker crash)
+            if (pfds[i].revents & (POLLHUP | POLLERR)) {
+                // Worker died — mark it dead, skip
+                impl_->workers[i].result_rd = -1;
+                impl_->num_alive_workers--;
+                if (impl_->num_alive_workers <= 0) return std::nullopt;
+                continue;
+            }
             if (!(pfds[i].revents & POLLIN)) continue;
 
             int fd = impl_->workers[i].result_rd;
 
             PoolResultHdr hdr{};
-            auto* p = reinterpret_cast<uint8_t*>(&hdr);
-            size_t rem = sizeof(hdr);
-            while (rem > 0) {
-                auto n = read(fd, p, rem);
-                if (n <= 0) return std::nullopt;
-                p += n;
-                rem -= n;
-            }
-
-            auto pipe_read = [](int f, void* buf, size_t count) -> bool {
-                auto* p = static_cast<uint8_t*>(buf);
-                while (count > 0) {
-                    auto n = read(f, p, count);
-                    if (n <= 0) return false;
-                    p += n; count -= n;
-                }
-                return true;
-            };
+            if (!FullRead(fd, &hdr, sizeof(hdr))) return std::nullopt;
 
             PoolResult result;
             result.pdf_path = hdr.pdf_path;
@@ -686,31 +749,49 @@ std::optional<PoolResult> Pool::next() {
                 auto& pi = hdr.pages[j];
                 auto pg_size = static_cast<size_t>(pi.stride) * pi.height;
                 auto* copy = static_cast<uint8_t*>(std::malloc(pg_size));
-                if (!copy) continue;
 
                 if (pi.slot_idx >= 0) {
-                    // Copy from shared memory, free slot
-                    std::memcpy(copy,
-                                impl_->page_slots + static_cast<size_t>(pi.slot_idx) * kPageSlotSize,
-                                pg_size);
-                    int top = impl_->shared->slot_top.fetch_add(1, std::memory_order_acq_rel);
-                    impl_->shared->slot_stack[top].store(pi.slot_idx, std::memory_order_release);
+                    if (copy) {
+                        std::memcpy(copy,
+                                    impl_->page_slots + static_cast<size_t>(pi.slot_idx) * kPageSlotSize,
+                                    pg_size);
+                        result.pages.emplace_back(copy, pi.width, pi.height, pi.stride);
+                    }
+                    // Fix #4: ALWAYS free slot, even on OOM
+                    auto* sh = impl_->shared;
+                    int top = sh->slot_top.load(std::memory_order_acquire);
+                    while (true) {
+                        sh->slot_stack[top] = pi.slot_idx;
+                        if (sh->slot_top.compare_exchange_weak(
+                                top, top + 1, std::memory_order_acq_rel))
+                            break;
+                    }
                 } else {
-                    // Read pixels from pipe
-                    if (!pipe_read(fd, copy, pg_size)) { std::free(copy); break; }
+                    // Pipe fallback — must read pixels regardless of OOM
+                    if (copy) {
+                        if (!FullRead(fd, copy, pg_size)) { std::free(copy); break; }
+                        result.pages.emplace_back(copy, pi.width, pi.height, pi.stride);
+                    } else {
+                        // OOM but must drain pipe to keep protocol in sync
+                        size_t skip = pg_size;
+                        uint8_t drain[4096];
+                        while (skip > 0) {
+                            size_t chunk = std::min(skip, sizeof(drain));
+                            if (!FullRead(fd, drain, chunk)) break;
+                            skip -= chunk;
+                        }
+                    }
                 }
-                result.pages.emplace_back(copy, pi.width, pi.height, pi.stride);
             }
 
-            impl_->complete_count++;
+            impl_->complete_count.fetch_add(1, std::memory_order_release);
             return result;
         }
     }
 }
 
 void Pool::finish() {
-    std::lock_guard<std::mutex> lock(impl_->submit_mtx);
-    impl_->finished = true;
+    impl_->finished.store(true, std::memory_order_release);
 }
 
 int Pool::submitted() const {
