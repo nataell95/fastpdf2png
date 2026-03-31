@@ -2,6 +2,7 @@
 
 ## 2.0.0
 
+- **Codebase restructured**: CMake build system (with presets), public headers moved to `include/fastpdf2png/`, source split into `src/{cli,lib,internal,png}`, language bindings moved to `bindings/{python,node}`, vendored deps in `third_party/`, `VERSION` file as single source of truth for versioning.
 - **Pool mode** (`--pool`/`--batch`): pre-forked worker pool with pipe-based IPC for streaming high-throughput batch processing. Workers stay alive between PDFs — zero fork overhead per file.
 - **Windows pool mode**: `CreateProcess` + anonymous pipes, same architecture as Unix.
 - **FPDF_REVERSE_BYTE_ORDER**: PDFium renders directly to RGBA — eliminates BGRA→RGBA swizzle pass. fpng encodes with zero conversion overhead.

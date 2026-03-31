@@ -14,6 +14,9 @@ pip install fastpdf2png
 Or build from source:
 ```bash
 git clone https://github.com/nataell95/fastpdf2png.git && cd fastpdf2png
+cmake --preset release && cmake --build build
+
+# Or use the convenience wrapper:
 bash scripts/build.sh
 ```
 
@@ -103,7 +106,7 @@ engine.close();
 ### C++ native library
 
 ```cpp
-#include "fastpdf2png/lib.h"
+#include "fastpdf2png/fastpdf2png.h"
 
 fpdf2png::Engine engine;
 
@@ -137,7 +140,7 @@ int m = engine.page_count({pdf_data.data(), pdf_data.size()});
 ### C API (for FFI — Python ctypes, Node ffi-napi, etc.)
 
 ```c
-#include "fastpdf2png/lib.h"
+#include "fastpdf2png/c_api.h"
 
 // Initialize PDFium (call once)
 fpdf2png_init();
@@ -145,23 +148,23 @@ fpdf2png_init();
 // Get page count
 int n = fpdf2png_page_count("doc.pdf");
 
-// Render all pages — returns array of {data, width, height, stride}
-fpdf2png_page_c* pages = NULL;
-int count = 0;
-int err = fpdf2png_render("doc.pdf", 150.0f, /*no_aa=*/0, &pages, &count);
+// Render all pages — caller allocates array, function fills pixel buffers
+int n = fpdf2png_page_count("doc.pdf");
+fpdf2png_page_c* pages = (fpdf2png_page_c*)calloc(n, sizeof(fpdf2png_page_c));
+int err = fpdf2png_render("doc.pdf", 150.0f, /*no_aa=*/0, pages, n);
 if (err == 0) {
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < n; i++) {
         // pages[i].data   — RGBA pixels (width * 4 bytes per row, stride-aligned)
         // pages[i].width, pages[i].height, pages[i].stride
     }
-    fpdf2png_free(pages, count);  // free all page buffers + array
+    fpdf2png_free(pages, n);  // free pixel buffers + array
 }
 
 // Render from memory buffer
-fpdf2png_page_c* pages2 = NULL;
-int count2 = 0;
-fpdf2png_render_mem(pdf_bytes, pdf_size, 150.0f, 0, &pages2, &count2);
-fpdf2png_free(pages2, count2);
+int m = fpdf2png_page_count("doc.pdf");  // or get count another way
+fpdf2png_page_c* pages2 = (fpdf2png_page_c*)calloc(m, sizeof(fpdf2png_page_c));
+fpdf2png_render_mem(pdf_bytes, pdf_size, 150.0f, 0, pages2, m);
+fpdf2png_free(pages2, m);
 
 // Shutdown PDFium (call once at exit)
 fpdf2png_shutdown();

@@ -1,13 +1,21 @@
-# Build artifacts
+# CMake
+cmake-build-*/
+CMakeUserPresets.json
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+# Build
 build/
 *.o
+*.obj
 *.so
 *.dylib
 *.a
 *.dSYM/
+*.plist
 
-# PDFium (downloaded at build time)
-pdfium
+# PDFium
 pdfium/
 
 # Python
@@ -19,19 +27,21 @@ dist/
 .eggs/
 *.whl
 
-# IDE
+# Node
+node_modules/
+
+# IDE / local tools
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
 .DS_Store
 
-# Sanitizer output
-*.plist
-
-# Testing/benchmark output
-/tmp/
+# Testing
 *.png
-bench_sample.pdf
 .playwright-mcp/
+
+# Benchmark data
+bench_sample.pdf

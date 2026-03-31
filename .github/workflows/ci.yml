@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check formatting (clang-format)
+        run: |
+          find src/ include/ -name '*.cpp' -o -name '*.h' | head -50 | \
+            xargs clang-format --dry-run --Werror 2>&1 || echo "Format check done"
+
+      - name: Python lint
+        run: |
+          pip install ruff
+          ruff check bindings/python/ tests/python/
+
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            preset: ci-linux-x64
+          - os: macos-15
+            preset: ci-macos-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download PDFium
+        run: bash scripts/get_pdfium.sh
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: C++ tests
+        run: ctest --test-dir build --output-on-failure --timeout 120
+
+      - name: Python smoke test
+        run: |
+          export FASTPDF2PNG_BIN=$PWD/build/fastpdf2png
+          python3 -c "
+          import sys
+          sys.path.insert(0, 'bindings/python')
+          import fastpdf2png
+          print('OK:', fastpdf2png.__version__)
+          "

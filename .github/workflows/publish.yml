@@ -1,0 +1,166 @@
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  NODE_VERSION: "22"
+
+jobs:
+  # Wait for the Build workflow to complete (triggered by same tag push)
+  wait-for-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Build workflow artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Wait up to 30 minutes for the Build workflow to complete
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sha = context.sha;
+            const maxWait = 30 * 60 * 1000;
+            const start = Date.now();
+
+            while (Date.now() - start < maxWait) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner, repo,
+                workflow_id: 'build.yml',
+                head_sha: sha,
+                status: 'completed',
+              });
+              const success = runs.data.workflow_runs.find(r => r.conclusion === 'success');
+              if (success) {
+                console.log(`Build workflow ${success.id} completed successfully`);
+                return;
+              }
+              console.log('Waiting for Build workflow to complete...');
+              await new Promise(r => setTimeout(r, 30000));
+            }
+            throw new Error('Timed out waiting for Build workflow');
+
+  publish-pypi:
+    needs: wait-for-build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download wheels from Build workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sha = context.sha;
+
+            // Find the successful Build workflow run
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner, repo,
+              workflow_id: 'build.yml',
+              head_sha: sha,
+              status: 'completed',
+            });
+            const buildRun = runs.data.workflow_runs.find(r => r.conclusion === 'success');
+            if (!buildRun) throw new Error('No successful Build workflow found');
+
+            // List artifacts from that run
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner, repo,
+              run_id: buildRun.id,
+            });
+
+            const fs = require('fs');
+            fs.mkdirSync('dist', { recursive: true });
+
+            for (const artifact of artifacts.data.artifacts) {
+              if (!artifact.name.startsWith('wheel-')) continue;
+              const download = await github.rest.actions.downloadArtifact({
+                owner, repo,
+                artifact_id: artifact.id,
+                archive_format: 'zip',
+              });
+              fs.writeFileSync(`${artifact.name}.zip`, Buffer.from(download.data));
+            }
+
+      - name: Extract wheels
+        run: |
+          mkdir -p dist
+          for z in wheel-*.zip; do
+            [ -f "$z" ] && unzip -o "$z" -d dist/
+          done
+          ls -lh dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+
+  publish-npm:
+    needs: wait-for-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Download npm artifacts from Build workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sha = context.sha;
+
+            const runs = await github.rest.actions.listWorkflowRuns({
+              owner, repo,
+              workflow_id: 'build.yml',
+              head_sha: sha,
+              status: 'completed',
+            });
+            const buildRun = runs.data.workflow_runs.find(r => r.conclusion === 'success');
+            if (!buildRun) throw new Error('No successful Build workflow found');
+
+            const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
+              owner, repo,
+              run_id: buildRun.id,
+            });
+
+            const fs = require('fs');
+            fs.mkdirSync('npm-artifacts', { recursive: true });
+
+            for (const artifact of artifacts.data.artifacts) {
+              if (!artifact.name.startsWith('npm-')) continue;
+              const download = await github.rest.actions.downloadArtifact({
+                owner, repo,
+                artifact_id: artifact.id,
+                archive_format: 'zip',
+              });
+              fs.writeFileSync(`npm-artifacts/${artifact.name}.zip`, Buffer.from(download.data));
+            }
+
+      - name: Extract npm packages
+        run: |
+          cd npm-artifacts
+          for z in *.zip; do
+            [ -f "$z" ] && unzip -o "$z"
+          done
+          ls -lh *.tgz 2>/dev/null || true
+
+      - name: Publish platform packages
+        run: |
+          for tgz in npm-artifacts/*.tgz; do
+            [ -f "$tgz" ] && npm publish "$tgz" --access public || true
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish main package
+        run: |
+          cd npm
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

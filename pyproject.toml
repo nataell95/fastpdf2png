@@ -1,31 +1,37 @@
+# Root pyproject.toml — redirects to bindings/python/ for the actual package.
+#
+# To build/install:
+#   cd bindings/python && pip install .
+#
+# This file exists so that tools scanning the repo root find a valid
+# pyproject.toml.  The canonical package definition lives in
+# bindings/python/pyproject.toml.
+
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "fastpdf2png"
-version = "2.0.0"
-description = "Ultra-fast PDF to PNG converter"
-readme = "README.md"
+dynamic = ["version"]
+description = "Ultra-fast PDF to PNG converter (see bindings/python/ for full config)"
 license = "MIT"
 requires-python = ">=3.8"
 authors = [{ name = "Nataell Cornu" }]
-keywords = ["pdf", "png", "converter", "pdfium", "fast", "simd"]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
-]
 
 [project.urls]
 Homepage = "https://github.com/nataell95/fastpdf2png"
 Repository = "https://github.com/nataell95/fastpdf2png"
-Issues = "https://github.com/nataell95/fastpdf2png/issues"
 
-[project.optional-dependencies]
-pil = ["Pillow"]
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
 
 [tool.setuptools.packages.find]
+where = ["bindings/python"]
 include = ["fastpdf2png*"]
 
 [tool.setuptools.package-data]
 "fastpdf2png" = ["bin/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["bindings/python"]

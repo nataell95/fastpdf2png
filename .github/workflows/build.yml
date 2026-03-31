@@ -1,12 +1,9 @@
-name: Build & Publish
+name: Build
 
 on:
   push:
     branches: [main]
     tags: ["v*"]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
 
 env:
   PYTHON_VERSION: "3.11"
@@ -19,17 +16,17 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            arch: x86_64
+            preset: ci-linux-x64
             wheel_plat: manylinux_2_17_x86_64
             npm_platform: linux
             npm_arch: x64
           - os: macos-15
-            arch: arm64
+            preset: ci-macos-arm64
             wheel_plat: macosx_15_0_arm64
             npm_platform: darwin
             npm_arch: arm64
           - os: windows-latest
-            arch: x86_64
+            preset: ci-windows-x64
             wheel_plat: win_amd64
             npm_platform: win32
             npm_arch: x64
@@ -47,19 +44,20 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Install build tools
-        run: pip install build wheel
-
-      - name: Build C++ binary (Unix)
+      - name: Download PDFium (Unix)
         if: runner.os != 'Windows'
-        run: bash scripts/build.sh
+        run: bash scripts/get_pdfium.sh
 
-      - name: Build C++ binary (Windows)
+      - name: Download PDFium (Windows)
         if: runner.os == 'Windows'
-        shell: cmd
+        shell: bash
+        run: bash scripts/get_pdfium.sh
+
+      - name: Configure & Build
+        shell: bash
         run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          call scripts\build.bat
+          cmake --preset ${{ matrix.preset }}
+          cmake --build build --config Release --parallel
 
       # --- Python wheel ---
 
@@ -78,43 +76,38 @@ jobs:
         shell: cmd
         run: |
           mkdir fastpdf2png\bin 2>nul
-          copy build\fastpdf2png.exe fastpdf2png\bin\
+          copy build\Release\fastpdf2png.exe fastpdf2png\bin\ 2>nul || copy build\fastpdf2png.exe fastpdf2png\bin\
           if exist build\pdfium.dll copy build\pdfium.dll fastpdf2png\bin\
+          if exist build\Release\pdfium.dll copy build\Release\pdfium.dll fastpdf2png\bin\
 
       - name: Build Python wheel
-        run: python -m build --wheel
+        run: |
+          pip install build wheel
+          python -m build --wheel
 
       - name: Retag wheel with platform
         shell: bash
-        env:
-          WHEEL_PLAT: ${{ matrix.wheel_plat }}
         run: |
           cd dist
           for whl in *.whl; do
             python -m wheel tags --platform-tag "$WHEEL_PLAT" --remove "$whl"
           done
           ls -lh *.whl
-
-      - name: Python smoke test
-        run: |
-          pip install dist/*.whl
-          python -c "import fastpdf2png; print('Python import OK')"
+        env:
+          WHEEL_PLAT: ${{ matrix.wheel_plat }}
 
       - name: Upload Python wheel
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.os }}-${{ matrix.arch }}
+          name: wheel-${{ matrix.os }}
           path: dist/*.whl
 
       # --- npm platform package ---
 
       - name: Build npm platform package (Unix)
         if: runner.os != 'Windows'
-        env:
-          NPM_PLATFORM: ${{ matrix.npm_platform }}
-          NPM_ARCH: ${{ matrix.npm_arch }}
+        shell: bash
         run: |
-          PKG_NAME="@fastpdf2png/${NPM_PLATFORM}-${NPM_ARCH}"
           PKG_DIR="npm-platform-pkg"
           mkdir -p "$PKG_DIR"
 
@@ -126,7 +119,7 @@ jobs:
 
           cat > "$PKG_DIR/package.json" << PKGJSON
           {
-            "name": "${PKG_NAME}",
+            "name": "@fastpdf2png/${NPM_PLATFORM}-${NPM_ARCH}",
             "version": "1.3.1",
             "description": "fastpdf2png binary for ${NPM_PLATFORM}-${NPM_ARCH}",
             "os": ["${NPM_PLATFORM}"],
@@ -138,19 +131,20 @@ jobs:
 
           cd "$PKG_DIR" && npm pack
           ls -lh *.tgz
+        env:
+          NPM_PLATFORM: ${{ matrix.npm_platform }}
+          NPM_ARCH: ${{ matrix.npm_arch }}
 
       - name: Build npm platform package (Windows)
         if: runner.os == 'Windows'
         shell: bash
-        env:
-          NPM_PLATFORM: ${{ matrix.npm_platform }}
-          NPM_ARCH: ${{ matrix.npm_arch }}
         run: |
           PKG_DIR="npm-platform-pkg"
           mkdir -p "$PKG_DIR"
 
-          cp build/fastpdf2png.exe "$PKG_DIR/"
+          cp build/Release/fastpdf2png.exe "$PKG_DIR/" 2>/dev/null || cp build/fastpdf2png.exe "$PKG_DIR/"
           [ -f build/pdfium.dll ] && cp build/pdfium.dll "$PKG_DIR/" || true
+          [ -f build/Release/pdfium.dll ] && cp build/Release/pdfium.dll "$PKG_DIR/" || true
 
           cat > "$PKG_DIR/package.json" << PKGJSON
           {
@@ -165,6 +159,9 @@ jobs:
           PKGJSON
 
           cd "$PKG_DIR" && npm pack
+        env:
+          NPM_PLATFORM: ${{ matrix.npm_platform }}
+          NPM_ARCH: ${{ matrix.npm_arch }}
 
       - name: Upload npm package
         uses: actions/upload-artifact@v4
@@ -172,9 +169,21 @@ jobs:
           name: npm-${{ matrix.npm_platform }}-${{ matrix.npm_arch }}
           path: npm-platform-pkg/*.tgz
 
+      # --- Upload raw binary ---
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.os }}
+          path: |
+            build/fastpdf2png
+            build/fastpdf2png.exe
+            build/Release/fastpdf2png.exe
+
   test:
     needs: build
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -190,10 +199,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Download artifacts
+      - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          pattern: wheel-*
           merge-multiple: true
 
       - name: Install Python package (Unix)
@@ -213,9 +223,16 @@ jobs:
         run: curl -sL -o test.pdf "https://arxiv.org/pdf/2312.10997"
 
       - name: Python tests
+        run: python tests/test_converter.py
         env:
           FASTPDF2PNG_TEST_PDF: test.pdf
-        run: python tests/test_converter.py
+
+      - name: Download npm artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: npm-artifacts
+          pattern: npm-*
+          merge-multiple: true
 
       - name: Install binary for Node.js test (Unix)
         if: runner.os != 'Windows'
@@ -225,7 +242,7 @@ jobs:
             Linux-x86_64)  PLAT="linux-x64" ;;
             Darwin-arm64)  PLAT="darwin-arm64" ;;
           esac
-          tar xzf artifacts/*${PLAT}*.tgz -C build --strip-components=1
+          tar xzf npm-artifacts/*${PLAT}*.tgz -C build --strip-components=1
           chmod +x build/fastpdf2png
 
       - name: Install binary for Node.js test (Windows)
@@ -233,7 +250,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p build
-          tar xzf artifacts/*win32-x64*.tgz -C build --strip-components=1
+          tar xzf npm-artifacts/*win32-x64*.tgz -C build --strip-components=1
 
       - name: Node.js smoke test
         run: |
@@ -243,58 +260,3 @@ jobs:
             const n = pdf.pageCount(process.cwd() + '/../test.pdf');
             console.log('Node.js OK: ' + n + ' pages');
           "
-
-  publish-pypi:
-    needs: [build, test]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      id-token: write
-
-    steps:
-      - name: Download wheels
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          pattern: wheel-*
-          merge-multiple: true
-
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-
-  publish-npm:
-    needs: [build, test]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Download npm packages
-        uses: actions/download-artifact@v4
-        with:
-          path: npm-artifacts
-          pattern: npm-*
-          merge-multiple: true
-
-      - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          for tgz in npm-artifacts/*.tgz; do
-            npm publish "$tgz" --access public || true
-          done
-
-      - name: Publish main package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          cd npm
-          npm publish --access public
