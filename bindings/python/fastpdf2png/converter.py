@@ -18,11 +18,16 @@ _AUTO_WORKERS = min(4, max(1, os.cpu_count() or 1))
 def _find_binary() -> Path:
     import shutil
     import sys
+    # Check environment variable first (set by CI or user)
+    env_bin = os.environ.get("FASTPDF2PNG_BIN")
+    if env_bin and Path(env_bin).exists():
+        return Path(env_bin)
     ext = ".exe" if sys.platform == "win32" else ""
     name = f"fastpdf2png{ext}"
     for p in [
         _PKG_DIR / "bin" / name,              # installed via pip
-        _PROJECT_ROOT / "build" / name,        # built from source (cmake --preset release)
+        _PROJECT_ROOT / "build" / name,        # cmake --preset release (Unix)
+        _PROJECT_ROOT / "build" / "Release" / name,  # cmake MSVC (Windows)
         _ROOT_DIR / "build" / name,            # legacy location
     ]:
         if p.exists():
