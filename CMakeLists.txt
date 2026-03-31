@@ -124,10 +124,24 @@ if(FP2P_BUILD_CLI)
         list(APPEND _cli_sources src/cli/platform/worker_win.cpp)
     endif()
 
+    # On Windows, internal symbols are not exported from the DLL, so the CLI
+    # must compile internal sources directly rather than linking through the shared lib.
+    if(WIN32)
+        list(APPEND _cli_sources
+            src/internal/pdfium_render.cpp
+            src/internal/file_io.cpp
+            src/internal/shared_memory.cpp
+            src/png/png_writer.cpp
+        )
+    endif()
+
     add_executable(fastpdf2png_bin ${_cli_sources})
     target_link_libraries(fastpdf2png_bin PRIVATE
         fastpdf2png_lib PDFium::PDFium
     )
+    if(WIN32)
+        target_link_libraries(fastpdf2png_bin PRIVATE fpng libdeflate::libdeflate)
+    endif()
     target_include_directories(fastpdf2png_bin PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${CMAKE_SOURCE_DIR}/include
