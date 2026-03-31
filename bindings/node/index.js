@@ -16,7 +16,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 
-// Locate the binary: bundled platform package → local build → PATH
+// Locate the binary: bundled platform package -> local build -> PATH
 function findBinary() {
   const platform = os.platform();
   const arch = os.arch();
@@ -29,7 +29,7 @@ function findBinary() {
   } catch (_) {}
 
   // 2. Local build (development)
-  const localBin = path.join(__dirname, "..", "build", `fastpdf2png${ext}`);
+  const localBin = path.join(__dirname, "..", "..", "build", `fastpdf2png${ext}`);
   if (fs.existsSync(localBin)) return localBin;
 
   // 3. Bundled in this package
@@ -117,17 +117,26 @@ class Engine {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this._stdout = "";
-    this._resolve = null;
+    this._queue = [];  // FIFO queue of { resolve, reject } pairs
     this._proc.stdout.on("data", (data) => {
       this._stdout += data.toString();
-      if (this._stdout.includes("\n") && this._resolve) {
-        const line = this._stdout.split("\n")[0];
-        this._stdout = this._stdout.slice(line.length + 1);
-        const resolve = this._resolve;
-        this._resolve = null;
+      this._drain();
+    });
+  }
+
+  /** Process buffered stdout lines against the pending queue. */
+  _drain() {
+    while (this._stdout.includes("\n") && this._queue.length > 0) {
+      const nlIdx = this._stdout.indexOf("\n");
+      const line = this._stdout.slice(0, nlIdx);
+      this._stdout = this._stdout.slice(nlIdx + 1);
+      const { resolve, reject } = this._queue.shift();
+      if (line.startsWith("ERROR")) {
+        reject(new Error(line));
+      } else {
         resolve(line);
       }
-    });
+    }
   }
 
   _cmd(command) {
@@ -135,10 +144,7 @@ class Engine {
       if (!this._proc || this._proc.exitCode !== null) {
         return reject(new Error("Engine is closed"));
       }
-      this._resolve = (line) => {
-        if (line.startsWith("ERROR")) reject(new Error(line));
-        else resolve(line);
-      };
+      this._queue.push({ resolve, reject });
       this._proc.stdin.write(command + "\n");
     });
   }
@@ -183,6 +189,11 @@ class Engine {
       this._proc.stdin.end();
     }
     this._proc = null;
+    // Reject any pending commands
+    for (const { reject } of this._queue) {
+      reject(new Error("Engine closed"));
+    }
+    this._queue = [];
   }
 }
 

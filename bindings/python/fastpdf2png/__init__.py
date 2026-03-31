@@ -15,5 +15,15 @@ fastpdf2png — Ultra-fast PDF to PNG converter.
 
 from .converter import to_images, to_files, to_bytes, to_raw, page_count, batch_to_files, Engine
 
-__version__ = "2.0.0"
+from pathlib import Path as _Path
+
+def _read_version() -> str:
+    """Read version from VERSION file, with fallback."""
+    version_file = _Path(__file__).parent.parent.parent.parent / "VERSION"
+    try:
+        return version_file.read_text().strip()
+    except FileNotFoundError:
+        return "2.0.0"
+
+__version__ = _read_version()
 __all__ = ["to_images", "to_files", "to_bytes", "to_raw", "page_count", "batch_to_files", "Engine"]

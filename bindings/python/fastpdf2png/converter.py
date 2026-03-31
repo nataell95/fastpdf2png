@@ -10,21 +10,29 @@ from typing import List, Union
 
 _PKG_DIR = Path(__file__).parent
 _ROOT_DIR = _PKG_DIR.parent
+# Project root when running from source: bindings/python/fastpdf2png -> ../../..
+_PROJECT_ROOT = _PKG_DIR.parent.parent.parent
 _AUTO_WORKERS = min(4, max(1, os.cpu_count() or 1))
 
 
 def _find_binary() -> Path:
+    import shutil
     import sys
     ext = ".exe" if sys.platform == "win32" else ""
+    name = f"fastpdf2png{ext}"
     for p in [
-        _PKG_DIR / "bin" / f"fastpdf2png{ext}",     # installed via pip
-        _ROOT_DIR / "build" / f"fastpdf2png{ext}",   # built from source
-        Path(f"/usr/local/bin/fastpdf2png{ext}"),
+        _PKG_DIR / "bin" / name,              # installed via pip
+        _PROJECT_ROOT / "build" / name,        # built from source (cmake --preset release)
+        _ROOT_DIR / "build" / name,            # legacy location
     ]:
         if p.exists():
             return p
+    # Check PATH
+    found = shutil.which("fastpdf2png")
+    if found:
+        return Path(found)
     raise FileNotFoundError(
-        "fastpdf2png binary not found. Run: bash scripts/build.sh"
+        "fastpdf2png binary not found. Run: cmake --preset release && cmake --build build"
     )
 
 
@@ -367,29 +375,40 @@ class Engine:
     def to_files_many(self, pdfs: List[Union[str, Path]],
                       output_dir: Union[str, Path],
                       dpi: int = 150) -> List[Path]:
-        """Convert many PDFs in parallel using pre-forked worker pool."""
+        """Convert many PDFs in parallel using the existing daemon pool.
+
+        Distributes RENDER commands across all daemon processes using
+        pipeline() for maximum throughput — no subprocess spawning overhead.
+        """
         output_dir = Path(output_dir).resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        lines = []
+        # Build RENDER commands for each PDF
+        commands_by_daemon: dict = {i: [] for i in range(len(self._daemons))}
+        idx = 0
         for pdf in pdfs:
             pdf = Path(pdf).resolve()
             if not pdf.exists():
                 continue
             pattern = str(output_dir / f"{pdf.stem}_%03d.png")
-            lines.append(f"{pdf}\t{pattern}")
+            cmd = f"RENDER\t{pdf}\t{pattern}\t{dpi}\t1\t2"
+            daemon_idx = idx % len(self._daemons)
+            commands_by_daemon[daemon_idx].append(cmd)
+            idx += 1
 
-        if not lines:
-            return []
-
-        binary = _find_binary()
-        result = subprocess.run(
-            [str(binary), "--pool", str(dpi), str(len(self._daemons)), "-c", "2"],
-            input="\n".join(lines) + "\n",
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Pool conversion failed: {result.stderr}")
+        # Send commands to each daemon via pipeline (batch write + batch read)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._daemons)) as pool:
+            futures = []
+            for i, cmds in commands_by_daemon.items():
+                if cmds:
+                    futures.append(pool.submit(self._daemons[i].pipeline, cmds))
+            # Wait for all daemons to finish and check for errors
+            for f in concurrent.futures.as_completed(futures):
+                results = f.result()
+                for line in results:
+                    if line.startswith("ERROR"):
+                        raise RuntimeError(f"Daemon error: {line}")
 
         return sorted(output_dir.glob("*.png"))
 

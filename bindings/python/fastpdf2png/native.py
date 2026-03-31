@@ -9,6 +9,16 @@ from typing import List, Optional
 # Find the shared library
 _LIB = None
 
+
+class _PageC(ctypes.Structure):
+    _fields_ = [
+        ("data", ctypes.POINTER(ctypes.c_uint8)),
+        ("width", ctypes.c_int32),
+        ("height", ctypes.c_int32),
+        ("stride", ctypes.c_int32),
+    ]
+
+
 def _load_lib():
     global _LIB
     if _LIB is not None:
@@ -29,18 +39,20 @@ def _load_lib():
         if p.exists():
             _LIB = ctypes.CDLL(str(p))
             _LIB.fpdf2png_init()
+
+            # Set argtypes/restype once at load time (not per-call)
+            _LIB.fpdf2png_render.argtypes = [
+                ctypes.c_char_p, ctypes.c_float, ctypes.c_int,
+                ctypes.POINTER(ctypes.POINTER(_PageC)), ctypes.POINTER(ctypes.c_int)
+            ]
+            _LIB.fpdf2png_render.restype = ctypes.c_int
+            _LIB.fpdf2png_free.argtypes = [ctypes.POINTER(_PageC), ctypes.c_int]
+            _LIB.fpdf2png_page_count.argtypes = [ctypes.c_char_p]
+            _LIB.fpdf2png_page_count.restype = ctypes.c_int
+
             return _LIB
 
     raise FileNotFoundError(f"{lib_name} not found. Run: bash scripts/build.sh")
-
-
-class _PageC(ctypes.Structure):
-    _fields_ = [
-        ("data", ctypes.POINTER(ctypes.c_uint8)),
-        ("width", ctypes.c_int32),
-        ("height", ctypes.c_int32),
-        ("stride", ctypes.c_int32),
-    ]
 
 
 class PageBuffer:
@@ -75,13 +87,6 @@ def _render_one(args):
     """Worker function for ProcessPoolExecutor — runs in a separate process."""
     pdf_path, dpi, no_aa = args
     lib = _load_lib()
-
-    lib.fpdf2png_render.argtypes = [
-        ctypes.c_char_p, ctypes.c_float, ctypes.c_int,
-        ctypes.POINTER(ctypes.POINTER(_PageC)), ctypes.POINTER(ctypes.c_int)
-    ]
-    lib.fpdf2png_render.restype = ctypes.c_int
-    lib.fpdf2png_free.argtypes = [ctypes.POINTER(_PageC), ctypes.c_int]
 
     pages_ptr = ctypes.POINTER(_PageC)()
     count = ctypes.c_int(0)
@@ -145,6 +150,4 @@ def render_many(pdf_paths: List[str], dpi: float = 150, no_aa: bool = False,
 def page_count(pdf_path: str) -> int:
     """Get page count without rendering."""
     lib = _load_lib()
-    lib.fpdf2png_page_count.argtypes = [ctypes.c_char_p]
-    lib.fpdf2png_page_count.restype = ctypes.c_int
     return lib.fpdf2png_page_count(str(Path(pdf_path).resolve()).encode())
