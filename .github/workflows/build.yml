@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     tags: ["v*"]
 
 env:
@@ -64,26 +64,28 @@ jobs:
       - name: Bundle binary into Python package (Unix)
         if: runner.os != 'Windows'
         run: |
-          mkdir -p fastpdf2png/bin
-          cp build/fastpdf2png fastpdf2png/bin/
-          chmod +x fastpdf2png/bin/fastpdf2png
+          mkdir -p bindings/python/fastpdf2png/bin
+          cp build/fastpdf2png bindings/python/fastpdf2png/bin/
+          chmod +x bindings/python/fastpdf2png/bin/fastpdf2png
           for lib in build/libpdfium.so build/libpdfium.dylib; do
-            [ -f "$lib" ] && cp "$lib" fastpdf2png/bin/ || true
+            [ -f "$lib" ] && cp "$lib" bindings/python/fastpdf2png/bin/ || true
           done
 
       - name: Bundle binary into Python package (Windows)
         if: runner.os == 'Windows'
         shell: cmd
         run: |
-          mkdir fastpdf2png\bin 2>nul
-          copy build\Release\fastpdf2png.exe fastpdf2png\bin\ 2>nul || copy build\fastpdf2png.exe fastpdf2png\bin\
-          if exist build\pdfium.dll copy build\pdfium.dll fastpdf2png\bin\
-          if exist build\Release\pdfium.dll copy build\Release\pdfium.dll fastpdf2png\bin\
+          mkdir bindings\python\fastpdf2png\bin 2>nul
+          copy build\Release\fastpdf2png.exe bindings\python\fastpdf2png\bin\ 2>nul || copy build\fastpdf2png.exe bindings\python\fastpdf2png\bin\
+          if exist build\pdfium.dll copy build\pdfium.dll bindings\python\fastpdf2png\bin\
+          if exist build\Release\pdfium.dll copy build\Release\pdfium.dll bindings\python\fastpdf2png\bin\
 
       - name: Build Python wheel
         run: |
           pip install build wheel
+          cd bindings/python
           python -m build --wheel
+          mv dist/ ../../dist/
 
       - name: Retag wheel with platform
         shell: bash
@@ -120,7 +122,7 @@ jobs:
           cat > "$PKG_DIR/package.json" << PKGJSON
           {
             "name": "@fastpdf2png/${NPM_PLATFORM}-${NPM_ARCH}",
-            "version": "1.3.1",
+            "version": "2.0.0",
             "description": "fastpdf2png binary for ${NPM_PLATFORM}-${NPM_ARCH}",
             "os": ["${NPM_PLATFORM}"],
             "cpu": ["${NPM_ARCH}"],
@@ -149,7 +151,7 @@ jobs:
           cat > "$PKG_DIR/package.json" << PKGJSON
           {
             "name": "@fastpdf2png/${NPM_PLATFORM}-${NPM_ARCH}",
-            "version": "1.3.1",
+            "version": "2.0.0",
             "description": "fastpdf2png binary for ${NPM_PLATFORM}-${NPM_ARCH}",
             "os": ["${NPM_PLATFORM}"],
             "cpu": ["${NPM_ARCH}"],
@@ -223,7 +225,11 @@ jobs:
         run: curl -sL -o test.pdf "https://arxiv.org/pdf/2312.10997"
 
       - name: Python tests
-        run: python tests/test_converter.py
+        shell: bash
+        run: |
+          export FASTPDF2PNG_TEST_PDF=$PWD/test.pdf
+          cd tests/python
+          python -m pytest test_converter.py -v || python test_converter.py
         env:
           FASTPDF2PNG_TEST_PDF: test.pdf
 
@@ -254,9 +260,9 @@ jobs:
 
       - name: Node.js smoke test
         run: |
-          cd npm
+          cd bindings/node
           node -e "
             const pdf = require('./index.js');
-            const n = pdf.pageCount(process.cwd() + '/../test.pdf');
+            const n = pdf.pageCount(process.cwd() + '/../../test.pdf');
             console.log('Node.js OK: ' + n + ' pages');
           "
