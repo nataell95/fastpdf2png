@@ -1,0 +1,103 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "FP2P_NATIVE_ARCH": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "FP2P_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "AddressSanitizer",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FP2P_ENABLE_ASAN": "ON",
+        "FP2P_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "ubsan",
+      "displayName": "UBSan",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FP2P_ENABLE_UBSAN": "ON",
+        "FP2P_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "ci-linux-x64",
+      "displayName": "CI — Linux x86_64",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "FP2P_BUILD_TESTS": "ON",
+        "FP2P_NATIVE_ARCH": "OFF"
+      }
+    },
+    {
+      "name": "ci-macos-arm64",
+      "displayName": "CI — macOS arm64",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "FP2P_BUILD_TESTS": "ON",
+        "FP2P_NATIVE_ARCH": "OFF",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "14.0"
+      }
+    },
+    {
+      "name": "ci-windows-x64",
+      "displayName": "CI — Windows x64",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
+      "generator": "Visual Studio 17 2022",
+      "architecture": { "value": "x64", "strategy": "set" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FP2P_BUILD_TESTS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "ci-linux-x64", "configurePreset": "ci-linux-x64", "configuration": "Release" },
+    { "name": "ci-macos-arm64", "configurePreset": "ci-macos-arm64", "configuration": "Release" },
+    { "name": "ci-windows-x64", "configurePreset": "ci-windows-x64", "configuration": "Release" }
+  ],
+  "testPresets": [
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
+    { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } }
+  ]
+}
