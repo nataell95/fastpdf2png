@@ -18,8 +18,8 @@ find_path(PDFium_INCLUDE_DIR
     NO_DEFAULT_PATH
 )
 
-# Try config-based find first
-if(EXISTS "${PDFium_DIR}/PDFiumConfig.cmake")
+# Try config-based find first (skip on Windows — config sets DLL path not import lib)
+if(EXISTS "${PDFium_DIR}/PDFiumConfig.cmake" AND NOT WIN32)
     include("${PDFium_DIR}/PDFiumConfig.cmake")
 endif()
 
