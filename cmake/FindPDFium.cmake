@@ -25,9 +25,10 @@ endif()
 
 # Find the library
 if(WIN32)
+    # On Windows, link against the import library (.dll.lib or .lib), NOT the DLL
     find_library(PDFium_LIBRARY
-        NAMES pdfium.dll.lib pdfium
-        PATHS "${PDFium_DIR}/lib" "${PDFium_DIR}/bin"
+        NAMES pdfium.dll.lib pdfium.lib pdfium
+        PATHS "${PDFium_DIR}/lib"
         NO_DEFAULT_PATH
     )
     find_file(PDFium_DLL
