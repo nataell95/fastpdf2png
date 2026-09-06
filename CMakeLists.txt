@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 # Read version from VERSION file
-file(READ "${CMAKE_SOURCE_DIR}/VERSION" FP2P_VERSION)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" FP2P_VERSION)
 string(STRIP "${FP2P_VERSION}" FP2P_VERSION)
 
 project(fastpdf2png
@@ -25,22 +25,31 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # ── CMake modules ────────────────────────────────────────────────────
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+# Paths are project-relative (PROJECT_SOURCE_DIR): this project may be built
+# as a subproject via add_subdirectory / FetchContent, where the top-level
+# source directory belongs to the embedding project.
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 include(DetectSIMD)
 include(Sanitizers)
 
 # ── Find PDFium ──────────────────────────────────────────────────────
-# Download if not present
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/pdfium/include/fpdfview.h")
-    message(STATUS "PDFium not found, running get_pdfium.sh...")
-    execute_process(
-        COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/get_pdfium.sh"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-        RESULT_VARIABLE _pdfium_result
-    )
-    if(NOT _pdfium_result EQUAL 0)
-        message(FATAL_ERROR "Failed to download PDFium. Run scripts/get_pdfium.sh manually.")
+# -DPDFium_DIR=<sdk root> uses an SDK the caller already has (no download).
+# Otherwise the SDK is fetched into <source>/pdfium by scripts/get_pdfium.sh.
+if(NOT PDFium_DIR)
+    set(PDFium_DIR "${PROJECT_SOURCE_DIR}/pdfium")
+    if(NOT EXISTS "${PDFium_DIR}/include/fpdfview.h")
+        message(STATUS "PDFium not found, running get_pdfium.sh...")
+        execute_process(
+            COMMAND bash "${PROJECT_SOURCE_DIR}/scripts/get_pdfium.sh"
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            RESULT_VARIABLE _pdfium_result
+        )
+        if(NOT _pdfium_result EQUAL 0)
+            message(FATAL_ERROR "Failed to download PDFium. Run scripts/get_pdfium.sh manually.")
+        endif()
     endif()
+elseif(NOT EXISTS "${PDFium_DIR}/include/fpdfview.h")
+    message(FATAL_ERROR "PDFium_DIR=${PDFium_DIR} does not contain include/fpdfview.h")
 endif()
 
 find_package(PDFium REQUIRED)
@@ -68,10 +77,10 @@ endif()
 
 target_include_directories(fastpdf2png_lib
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/src
 )
 
 target_link_libraries(fastpdf2png_lib
@@ -148,8 +157,8 @@ if(FP2P_BUILD_CLI)
         target_link_libraries(fastpdf2png_bin PRIVATE fpng libdeflate::libdeflate)
     endif()
     target_include_directories(fastpdf2png_bin PRIVATE
-        ${CMAKE_SOURCE_DIR}/src
-        ${CMAKE_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/include
     )
     fp2p_apply_simd(fastpdf2png_bin)
 

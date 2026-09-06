@@ -63,6 +63,18 @@
       }
     },
     {
+      "name": "ci-linux-arm64",
+      "displayName": "CI — Linux aarch64",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_INTERPROCEDURAL_OPTIMIZATION": "ON",
+        "FP2P_BUILD_TESTS": "ON",
+        "FP2P_NATIVE_ARCH": "OFF"
+      }
+    },
+    {
       "name": "ci-macos-arm64",
       "displayName": "CI — macOS arm64",
       "inherits": "base",
@@ -94,6 +106,7 @@
     { "name": "debug", "configurePreset": "debug" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "ci-linux-x64", "configurePreset": "ci-linux-x64", "configuration": "Release" },
+    { "name": "ci-linux-arm64", "configurePreset": "ci-linux-arm64", "configuration": "Release" },
     { "name": "ci-macos-arm64", "configurePreset": "ci-macos-arm64", "configuration": "Release" },
     { "name": "ci-windows-x64", "configurePreset": "ci-windows-x64", "configuration": "Release" }
   ],

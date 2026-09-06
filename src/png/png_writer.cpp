@@ -4,6 +4,7 @@
 #include "png/png_writer.h"
 #include "internal/memory_pool.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -347,9 +348,20 @@ int WriteFile(const char* filename, const uint8_t* data, size_t size) {
 #ifdef __APPLE__
   fcntl(fd, F_NOCACHE, 1);
 #endif
-  auto written = write(fd, data, size);
-  close(fd);
-  return (written == static_cast<ssize_t>(size)) ? fast_png::kSuccess : fast_png::kErrorFileWriteFailed;
+  // write(2) may stop short of the request (signal, tmpfs limits, > 2 GiB on
+  // Linux) without that being an error: keep going until everything is out.
+  size_t done = 0;
+  while (done < size) {
+    const auto n = write(fd, data + done, size - done);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (n == 0) break;
+    done += static_cast<size_t>(n);
+  }
+  const int close_rc = close(fd);
+  return (done == size && close_rc == 0) ? fast_png::kSuccess : fast_png::kErrorFileWriteFailed;
 #endif
 }
 

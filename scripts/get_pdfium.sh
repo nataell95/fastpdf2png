@@ -4,9 +4,14 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Detect OS and architecture
+# Detect OS and architecture. TARGETARCH (Docker buildx: amd64 | arm64)
+# overrides the host's architecture for cross-platform image builds.
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
+case "${TARGETARCH:-}" in
+    amd64) ARCH=x86_64 ;;
+    arm64) ARCH=aarch64 ;;
+esac
 
 case "$OS" in
     linux)
@@ -36,7 +41,8 @@ echo "=== Downloading pre-built PDFium for $PLATFORM ==="
 
 # Use bblanchon's pdfium-binaries (well maintained)
 # https://github.com/bblanchon/pdfium-binaries/releases
-PDFIUM_BUILD="7713"
+# Override with PDFIUM_BUILD=<chromium build number> to pin a different release.
+PDFIUM_BUILD="${PDFIUM_BUILD:-7713}"
 DOWNLOAD_URL="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${PDFIUM_BUILD}/pdfium-${PLATFORM}.tgz"
 
 echo "Trying primary source..."

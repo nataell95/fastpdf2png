@@ -9,7 +9,7 @@
 
 # Allow user override via -DPDFium_DIR=...
 if(NOT PDFium_DIR)
-    set(PDFium_DIR "${CMAKE_SOURCE_DIR}/pdfium")
+    set(PDFium_DIR "${PROJECT_SOURCE_DIR}/pdfium")
 endif()
 
 find_path(PDFium_INCLUDE_DIR

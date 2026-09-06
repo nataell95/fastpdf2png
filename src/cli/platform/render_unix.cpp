@@ -64,10 +64,13 @@ int RenderSingle(const char* pdf_path, float dpi, const char* pattern,
 
 namespace {
 
+// A forked worker leaves with _exit, never exit(): exit() would run the
+// parent's atexit handlers and flush the parent's stdio buffers a second time,
+// and in daemon mode stdout is the command pipe back to the caller.
 [[noreturn]] void WorkerLoop(const char* pdf_path, float dpi, const char* pattern,
                              int compression, SharedState* shared, bool no_aa) {
     auto* doc = FPDF_LoadDocument(pdf_path, nullptr);
-    if (!doc) std::exit(1);
+    if (!doc) _exit(1);
 
     while (true) {
         const auto page = ClaimNextPage(shared);
@@ -77,7 +80,7 @@ namespace {
     }
 
     FPDF_CloseDocument(doc);
-    std::exit(0);
+    _exit(0);
 }
 
 } // anonymous namespace
@@ -101,10 +104,29 @@ int RenderMulti(const char* pdf_path, float dpi, const char* pattern,
             WorkerLoop(pdf_path, dpi, pattern, compression, shared, no_aa);
         else if (pid > 0)
             children.push_back(pid);
+        else
+            perror("fork");
     }
 
     for (auto pid : children)
         waitpid(pid, nullptr, 0);
+
+    // Pages nobody produced (every fork failed, or a worker died mid-way) are
+    // rendered here in-process instead of failing the whole document.
+    if (GetCompleted(shared) < pages) {
+        auto* doc = FPDF_LoadDocument(pdf_path, nullptr);
+        if (doc) {
+            char probe[4096];
+            for (int page = 0; page < pages; ++page) {
+                const auto n = std::snprintf(probe, sizeof(probe), pattern, page + 1);
+                if (n < 0 || static_cast<size_t>(n) >= sizeof(probe)) continue;
+                if (access(probe, F_OK) == 0) continue;
+                if (internal::RenderPageToFile(doc, page, dpi, pattern, compression, no_aa))
+                    MarkCompleted(shared);
+            }
+            FPDF_CloseDocument(doc);
+        }
+    }
 
     const auto completed = GetCompleted(shared);
     munmap(shared, sizeof(SharedState));

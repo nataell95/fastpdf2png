@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.1
+
+- **Embeddable build**: CMake paths are project-relative, so fastpdf2png builds as a subproject (`add_subdirectory` / `FetchContent` / `ExternalProject`) without touching the embedding project's tree.
+- **`-DPDFium_DIR` is honoured before any download**: a caller that already has a PDFium SDK no longer triggers `get_pdfium.sh`; a bad path is an error instead of a silent fallback.
+- **File output survives short writes**: `write(2)` returning less than requested (signals, tmpfs limits, > 2 GiB) is continued instead of reported as a failed page; `close(2)` errors are reported.
+- **Forked render workers exit with `_exit`**: no double flush of the parent's stdio (in daemon mode stdout is the command pipe), no atexit handlers in the child. A failed `fork()` is logged and pages no worker produced are rendered in-process instead of failing the document.
+- `get_pdfium.sh`: `TARGETARCH` (Docker buildx) and `PDFIUM_BUILD` overrides.
+- New `ci-linux-arm64` preset (no `-mcpu=native`, for distributable aarch64 builds).
+
 ## 2.0.0
 
 - **Codebase restructured**: CMake build system (with presets), public headers moved to `include/fastpdf2png/`, source split into `src/{cli,lib,internal,png}`, language bindings moved to `bindings/{python,node}`, vendored deps in `third_party/`, `VERSION` file as single source of truth for versioning.
