@@ -191,7 +191,16 @@ def page_count(pdf: Union[str, Path]) -> int:
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to read PDF: {result.stderr}")
-    return int(result.stdout.strip())
+    text = result.stdout.strip()
+    if not text.isdigit():
+        # The binary always prints the page count on success; anything else
+        # (an empty pipe, a stray message) is reported with everything we know
+        # rather than as a ValueError from int().
+        raise RuntimeError(
+            f"{binary} --info returned no page count "
+            f"(exit {result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r})"
+        )
+    return int(text)
 
 
 def batch_to_files(
