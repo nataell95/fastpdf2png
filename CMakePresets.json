@@ -92,7 +92,6 @@
       "displayName": "CI — Windows x64",
       "inherits": "base",
       "binaryDir": "${sourceDir}/build",
-      "generator": "Visual Studio 17 2022",
       "architecture": { "value": "x64", "strategy": "set" },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",

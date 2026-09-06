@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.10
+
+- CI: the Windows preset no longer pins the Visual Studio 2022 generator (GitHub's `windows-latest` image moved on); the newest installed Visual Studio is used.
+
 ## 2.0.9
 
 (2.0.1 – 2.0.8 were build/CI releases of the 2.0.0 code; the `VERSION` file now matches the tags again.)
