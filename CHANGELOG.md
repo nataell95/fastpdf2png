@@ -1,6 +1,8 @@
 # Changelog
 
-## 2.0.1
+## 2.0.9
+
+(2.0.1 – 2.0.8 were build/CI releases of the 2.0.0 code; the `VERSION` file now matches the tags again.)
 
 - **Embeddable build**: CMake paths are project-relative, so fastpdf2png builds as a subproject (`add_subdirectory` / `FetchContent` / `ExternalProject`) without touching the embedding project's tree.
 - **`-DPDFium_DIR` is honoured before any download**: a caller that already has a PDFium SDK no longer triggers `get_pdfium.sh`; a bad path is an error instead of a silent fallback.
